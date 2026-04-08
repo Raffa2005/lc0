@@ -135,7 +135,7 @@ InputPlanes EncodePositionForNN(
     pblczero::NetworkFormat::InputFormat input_format,
     std::span<const Position> history, int history_planes,
     FillEmptyHistory fill_empty_history, int* transform_out) {
-  InputPlanes result(kAuxPlaneBase + 8);
+  InputPlanes result(kAuxPlaneBase + 10);
 
   int transform = 0;
   // Canonicalization format needs to stop early to avoid applying transform in
@@ -221,8 +221,21 @@ InputPlanes EncodePositionForNN(
     if (IsCanonicalArmageddonFormat(input_format)) {
       if (we_are_black) result[kAuxPlaneBase + 6].SetAll();
     }
+    // Double-move variant: plane kAuxPlaneBase + 6 is also used for
+    // mid-double-move flag (all 1s when between move 1 and move 2).
+    if (history.back().IsMidDoublemove()) {
+      result[kAuxPlaneBase + 6].SetAll();
+    }
     // Plane kAuxPlaneBase + 7 is all ones to help NN find board edges.
     result[kAuxPlaneBase + 7].SetAll();
+    // Double-move variant: plane kAuxPlaneBase + 8 is our ability available,
+    // plane kAuxPlaneBase + 9 is their ability available.
+    if (history.back().OurDoublemoveAvailable()) {
+      result[kAuxPlaneBase + 8].SetAll();
+    }
+    if (history.back().TheirDoublemoveAvailable()) {
+      result[kAuxPlaneBase + 9].SetAll();
+    }
     if (stop_early) {
       castlings = board.castlings();
     }
