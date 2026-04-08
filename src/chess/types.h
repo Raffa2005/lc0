@@ -171,6 +171,14 @@ class Move {
   bool is_en_passant() const { return (data_ & kSpecialMask) == kEnPassant; }
   // TODO remove this once UciReponder starts using std::optional for ponder.
   bool is_null() const { return data_ == 0; }
+  // Double-move variant: whether this move activates the one-time ability.
+  bool is_ability_activation() const { return data_ & kAbilityActivation; }
+  Move WithAbilityActivation() const {
+    return Move(data_ | kAbilityActivation);
+  }
+  Move WithoutAbilityActivation() const {
+    return Move(data_ & ~kAbilityActivation);
+  }
 
   uint16_t raw_data() const { return data_; }
 
@@ -183,21 +191,22 @@ class Move {
   // - bits  12-13: if is_promotion:  promotion piece type
   //                if !is_promotion: SpecialMove
   // - bit   14:   is_promotion flag
-  // - bit   15:   reserved (potentially for side-to-move)
+  // - bit   15:   ability activation flag (double-move variant)
   // Castling is always encoded as a "king takes rook" move.
   uint16_t data_ = 0;
 
   enum Masks : uint16_t {
     // clang-format off
-    kToMask      = 0b0000000000111111,
-    kFromMask    = 0b0000111111000000,
-    kSpecialMask = 0b0111000000000000,
-    kCastling    = 0b0001000000000000,
-    kEnPassant   = 0b0010000000000000,
-    kPromotion   = 0b0100000000000000,
-    kPieceMask   = 0b0011000000000000,
+    kToMask              = 0b0000000000111111,
+    kFromMask            = 0b0000111111000000,
+    kSpecialMask         = 0b0111000000000000,
+    kCastling            = 0b0001000000000000,
+    kEnPassant           = 0b0010000000000000,
+    kPromotion           = 0b0100000000000000,
+    kPieceMask           = 0b0011000000000000,
+    kAbilityActivation   = 0b1000000000000000,
     // If/when we have side-to-move bit, also flip it here.
-    kFlipMask    = 0b0000111000111000,
+    kFlipMask            = 0b0000111000111000,
     // clang-format on
   };
 };

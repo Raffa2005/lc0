@@ -44,6 +44,10 @@
 namespace lczero {
 namespace classic {
 
+// Maximum number of edges per node. Must be >= 2 * max legal moves in chess
+// (218) to support doubled edges for the double-move variant.
+static constexpr int kMaxEdgesPerNode = 512;
+
 // Children of a node are stored the following way:
 // * Edges and Nodes edges point to are stored separately.
 // * There may be dangling edges (which don't yet point to any Node object yet)
@@ -178,7 +182,7 @@ class Node {
   bool IsTwoFoldTerminal() const { return terminal_type_ == Terminal::TwoFold; }
   typedef std::pair<GameResult, GameResult> Bounds;
   Bounds GetBounds() const { return {lower_bound_, upper_bound_}; }
-  uint8_t GetNumEdges() const { return num_edges_; }
+  uint16_t GetNumEdges() const { return num_edges_; }
 
   // Output must point to at least max_needed floats.
   void CopyPolicy(int max_needed, float* output) const {
@@ -316,9 +320,9 @@ class Node {
   // Index of this node is parent's edge list.
   uint16_t index_;
 
-  // 1 byte fields.
+  // 2 byte fields (double-move variant may need >255 edges).
   // Number of edges in @edges_.
-  uint8_t num_edges_ = 0;
+  uint16_t num_edges_ = 0;
 
   // Bit fields using parts of uint8_t fields initialized in the constructor.
   // Whether or not this node end game (with a winning of either sides or draw).

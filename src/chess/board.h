@@ -224,6 +224,9 @@ class ChessBoard {
   }
   const Castlings& castlings() const { return castlings_; }
   bool flipped() const { return flipped_; }
+  // Double-move variant: square of the opponent's king (for king-capture
+  // filtering during mid-double-move).
+  Square their_king() const { return their_king_; }
 
   bool operator==(const ChessBoard& other) const = default;
   bool operator!=(const ChessBoard& other) const = default;

@@ -141,8 +141,15 @@ class NetworkAsBackendComputation : public BackendComputation {
     const float max_p = std::accumulate(
         moves.begin(), moves.end(), -std::numeric_limits<float>::infinity(),
         [&, counter = 0](float max_p, const Move& move) mutable {
-          return std::max(max_p, dst[counter++] = computation->GetPVal(
-                                     idx, MoveToNNIndex(move, transform)));
+          // Double-move variant: ability-activation moves map to the second
+          // half of the 3716-output policy head (indices 1858..3715).
+          const uint16_t nn_idx =
+              move.is_ability_activation()
+                  ? MoveToNNIndex(move.WithoutAbilityActivation(), transform) +
+                        1858
+                  : MoveToNNIndex(move, transform);
+          return std::max(max_p, dst[counter++] =
+                                     computation->GetPVal(idx, nn_idx));
         });
     // Compute the softmax and compute the total.
     const float temperature = backend_->softmax_policy_temperature_;

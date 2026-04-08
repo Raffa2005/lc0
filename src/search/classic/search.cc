@@ -609,7 +609,13 @@ PositionHistory Search::GetPositionHistoryAtNode(const Node* node) const {
     rmoves.push_back(n->GetOwnEdge()->GetMove());
   }
   for (auto it = rmoves.rbegin(); it != rmoves.rend(); it++) {
-    history.Append(*it);
+    const Move m = *it;
+    if (m.is_ability_activation()) {
+      history.Append(m.WithoutAbilityActivation(),
+                     /*is_first_of_double=*/true);
+    } else {
+      history.Append(m);
+    }
   }
   return history;
 }
@@ -1595,12 +1601,12 @@ void SearchWorker::PickNodesToExtendTask(
   }
 
   // These 2 are 'filled pre-emptively'.
-  std::array<float, 256> current_pol;
-  std::array<float, 256> current_util;
+  std::array<float, kMaxEdgesPerNode> current_pol;
+  std::array<float, kMaxEdgesPerNode> current_util;
 
   // These 3 are 'filled on demand'.
-  std::array<float, 256> current_score;
-  std::array<int, 256> current_nstarted;
+  std::array<float, kMaxEdgesPerNode> current_score;
+  std::array<int, kMaxEdgesPerNode> current_nstarted;
   auto& cur_iters = workspace->cur_iters;
 
   Node::Iterator best_edge;
@@ -1671,7 +1677,7 @@ void SearchWorker::PickNodesToExtendTask(
         visits_to_perform.push_back(std::move(vtp_buffer.back()));
         vtp_buffer.pop_back();
       } else {
-        visits_to_perform.push_back(std::make_unique<std::array<int, 256>>());
+        visits_to_perform.push_back(std::make_unique<std::array<int, kMaxEdgesPerNode>>());
       }
       vtp_last_filled.push_back(-1);
 
@@ -1924,13 +1930,33 @@ void SearchWorker::ExtendNode(Node* node, int depth,
   // Initialize position sequence with pre-move position.
   history->Trim(search_->played_history_.GetLength());
   for (size_t i = 0; i < moves_to_node.size(); i++) {
-    history->Append(moves_to_node[i]);
+    const Move m = moves_to_node[i];
+    if (m.is_ability_activation()) {
+      // First move of a double-move: don't mirror, mark mid-double.
+      history->Append(m.WithoutAbilityActivation(),
+                      /*is_first_of_double=*/true);
+    } else {
+      history->Append(m);
+    }
   }
 
   // We don't need the mutex because other threads will see that N=0 and
   // N-in-flight=1 and will not touch this node.
   const auto& board = history->Last().GetBoard();
+  const auto& pos = history->Last();
   auto legal_moves = board.GenerateLegalMoves();
+
+  // During mid-double-move, filter out king captures (opponent's king may be
+  // in check from the first move, but capturing it is never legal).
+  if (pos.IsMidDoublemove()) {
+    const Square their_king = board.their_king();
+    legal_moves.erase(
+        std::remove_if(legal_moves.begin(), legal_moves.end(),
+                       [their_king](const Move& m) {
+                         return m.to() == their_king;
+                       }),
+        legal_moves.end());
+  }
 
   // Check whether it's a draw/lose by position. Importantly, we must check
   // these before doing the by-rule checks below.
@@ -2008,6 +2034,16 @@ void SearchWorker::ExtendNode(Node* node, int depth,
         search_->tb_hits_.fetch_add(1, std::memory_order_acq_rel);
         return;
       }
+    }
+  }
+
+  // Double-move variant: if ability is available and we're not already in a
+  // mid-double-move, add ability-activation edges for each legal move.
+  if (pos.OurDoublemoveAvailable() && !pos.IsMidDoublemove()) {
+    const size_t n = legal_moves.size();
+    legal_moves.reserve(2 * n);
+    for (size_t i = 0; i < n; i++) {
+      legal_moves.push_back(legal_moves[i].WithAbilityActivation());
     }
   }
 
@@ -2270,9 +2306,14 @@ void SearchWorker::DoBackupUpdateSingleNode(
         update_parent_bounds && p != search_->root_node_ && !p->IsTerminal() &&
         MaybeSetBounds(p, m, &n_to_fix, &v_delta, &d_delta, &m_delta);
 
-    // Q will be flipped for opponent.
-    v = -v;
-    v_delta = -v_delta;
+    // Q will be flipped for opponent — unless this node was reached via an
+    // ability-activation edge, meaning the same player moves at both n and p.
+    const bool same_player =
+        p->GetEdgeToNode(n)->GetMove().is_ability_activation();
+    if (!same_player) {
+      v = -v;
+      v_delta = -v_delta;
+    }
     m++;
 
     // Update the stats.
