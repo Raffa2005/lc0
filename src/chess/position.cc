@@ -43,6 +43,32 @@ Position::Position(const Position& parent, Move m)
   const bool is_zeroing = us_board_.ApplyMove(m);
   us_board_.Mirror();
   if (is_zeroing) rule50_ply_ = 0;
+  // After Mirror(), perspectives swap: our <-> their.
+  our_doublemove_available_ = parent.their_doublemove_available_;
+  their_doublemove_available_ = parent.our_doublemove_available_;
+  is_mid_doublemove_ = false;
+}
+
+Position::Position(const Position& parent, Move m, bool is_first_of_double)
+    : rule50_ply_(parent.rule50_ply_ + 1), ply_count_(parent.ply_count_ + 1) {
+  us_board_ = parent.us_board_;
+  const bool is_zeroing = us_board_.ApplyMove(m);
+  if (!is_first_of_double) {
+    us_board_.Mirror();
+  }
+  if (is_zeroing) rule50_ply_ = 0;
+
+  if (is_first_of_double) {
+    // Same player moves again; ability is consumed, no perspective swap.
+    our_doublemove_available_ = false;
+    their_doublemove_available_ = parent.their_doublemove_available_;
+    is_mid_doublemove_ = true;
+  } else {
+    // Normal move: perspectives swap after Mirror().
+    our_doublemove_available_ = parent.their_doublemove_available_;
+    their_doublemove_available_ = parent.our_doublemove_available_;
+    is_mid_doublemove_ = false;
+  }
 }
 
 Position::Position(const ChessBoard& board, int rule50_ply, int game_ply)
@@ -57,7 +83,10 @@ Position Position::FromFen(std::string_view fen) {
 }
 
 uint64_t Position::Hash() const {
-  return HashCat({us_board_.Hash(), static_cast<unsigned long>(repetitions_)});
+  return HashCat({us_board_.Hash(), static_cast<unsigned long>(repetitions_),
+                  static_cast<unsigned long>(our_doublemove_available_),
+                  static_cast<unsigned long>(their_doublemove_available_),
+                  static_cast<unsigned long>(is_mid_doublemove_)});
 }
 
 std::string Position::DebugString() const {
@@ -73,20 +102,30 @@ GameResult operator-(const GameResult& res) {
 }
 
 GameResult PositionHistory::ComputeGameResult() const {
-  const auto& board = Last().GetBoard();
+  const auto& last = Last();
+  const auto& board = last.GetBoard();
+
+  // During a double-move (between move 1 and move 2), the game is never over.
+  // The current player still needs to make move 2. Checkmate, stalemate, and
+  // draw conditions are only evaluated at the end of complete turns.
+  if (last.IsMidDoublemove()) {
+    return GameResult::UNDECIDED;
+  }
+
   auto legal_moves = board.GenerateLegalMoves();
   if (legal_moves.empty()) {
     if (board.IsUnderCheck()) {
       // Checkmate.
-      return IsBlackToMove() ? GameResult::WHITE_WON : GameResult::BLACK_WON;
+      return last.IsBlackToMove() ? GameResult::WHITE_WON
+                                  : GameResult::BLACK_WON;
     }
     // Stalemate.
     return GameResult::DRAW;
   }
 
   if (!board.HasMatingMaterial()) return GameResult::DRAW;
-  if (Last().GetRule50Ply() >= 100) return GameResult::DRAW;
-  if (Last().GetRepetitions() >= 2) return GameResult::DRAW;
+  if (last.GetRule50Ply() >= 100) return GameResult::DRAW;
+  if (last.GetRepetitions() >= 2) return GameResult::DRAW;
 
   return GameResult::UNDECIDED;
 }
@@ -110,6 +149,17 @@ void PositionHistory::Append(Move m) {
   int cycle_length;
   int repetitions = ComputeLastMoveRepetitions(&cycle_length);
   positions_.back().SetRepetitions(repetitions, cycle_length);
+}
+
+void PositionHistory::Append(Move m, bool is_first_of_double) {
+  positions_.push_back(Position(Last(), m, is_first_of_double));
+  if (!is_first_of_double) {
+    // Only count repetitions for positions that end a full turn.
+    int cycle_length;
+    int repetitions = ComputeLastMoveRepetitions(&cycle_length);
+    positions_.back().SetRepetitions(repetitions, cycle_length);
+  }
+  // Mid-double-move positions do not count for repetition.
 }
 
 int PositionHistory::ComputeLastMoveRepetitions(int* cycle_length) const {

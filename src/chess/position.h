@@ -40,6 +40,10 @@ class Position {
   Position() = default;
   // From parent position and move.
   Position(const Position& parent, Move m);
+  // From parent position and move, with double-move variant support.
+  // When is_first_of_double is true, the board is NOT mirrored after the move,
+  // so the same player moves again. The ability is consumed.
+  Position(const Position& parent, Move m, bool is_first_of_double);
   // From particular position.
   Position(const ChessBoard& board, int rule50_ply, int game_ply);
   // From fen.
@@ -70,6 +74,11 @@ class Position {
   // Gets board from the point of view of player to move.
   const ChessBoard& GetBoard() const { return us_board_; }
 
+  // Double-move variant state.
+  bool OurDoublemoveAvailable() const { return our_doublemove_available_; }
+  bool TheirDoublemoveAvailable() const { return their_doublemove_available_; }
+  bool IsMidDoublemove() const { return is_mid_doublemove_; }
+
   bool operator==(const Position&) const = default;
   bool operator!=(const Position&) const = default;
 
@@ -87,6 +96,12 @@ class Position {
   int cycle_length_ = 0;
   // number of half-moves since beginning of the game.
   int ply_count_ = 0;
+
+  // Double-move variant: whether each side's one-time ability is available.
+  bool our_doublemove_available_ = true;
+  bool their_doublemove_available_ = true;
+  // True when this position is between move 1 and move 2 of a double-move.
+  bool is_mid_doublemove_ = false;
 };
 
 // GetFen returns a FEN notation for the position.
@@ -134,6 +149,9 @@ class PositionHistory {
 
   // Appends a position to history.
   void Append(Move m);
+
+  // Appends a position to history with double-move variant support.
+  void Append(Move m, bool is_first_of_double);
 
   // Pops last move from history.
   void Pop() { positions_.pop_back(); }
