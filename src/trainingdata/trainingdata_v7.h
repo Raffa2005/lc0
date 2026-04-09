@@ -43,7 +43,7 @@ struct V7TrainingData : V6TrainingData {
   uint16_t next_played_idx;
   float reserved[8];
 } PACKED_STRUCT;
-static_assert(sizeof(V7TrainingData) == 8396, "Wrong struct size");
+static_assert(sizeof(V7TrainingData) == 15831, "Wrong struct size");
 
 #pragma pack(pop)
 

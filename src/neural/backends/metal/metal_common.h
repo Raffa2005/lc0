@@ -30,7 +30,7 @@
 namespace lczero {
 namespace metal_backend {
 
-static int kNumOutputPolicy = 1858;
+static int kNumOutputPolicy = 3716;
 static int kInputPlanes = 112;
 
 struct InputsOutputs {

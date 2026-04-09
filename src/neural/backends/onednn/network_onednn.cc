@@ -45,7 +45,7 @@
 namespace lczero {
 using namespace onednn_backend;
 
-static constexpr int kNumOutputPolicy = 1858;
+static constexpr int kNumOutputPolicy = 3716;
 
 struct InputsOutputs {
   InputsOutputs(int maxBatchSize, bool wdl, bool moves_left) {

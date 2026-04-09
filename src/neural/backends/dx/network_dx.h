@@ -39,7 +39,7 @@ namespace dx_backend {
 
 class DxNetwork;
 
-static constexpr int kNumOutputPolicy = 1858;
+static constexpr int kNumOutputPolicy = 3716;
 
 // Padding needed because on some HW (e.g: NV) fp16 requires gemm matrix
 // dimensions to be multiples of 8

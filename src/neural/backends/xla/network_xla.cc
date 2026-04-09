@@ -143,7 +143,7 @@ float XlaComputation::GetDVal(int sample) const {
 float XlaComputation::GetPVal(int sample, int move_id) const {
   const float* data = reinterpret_cast<const float*>(
       outputs_[network_->options_.output_policy->idx]->data());
-  return data[sample * 1858 + move_id];
+  return data[sample * 3716 + move_id];
 }
 
 float XlaComputation::GetMVal(int sample) const {

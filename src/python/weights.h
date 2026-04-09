@@ -134,7 +134,7 @@ class Output {
  public:
   // Not exposed.
   Output(const NetworkComputation& computation, int idx) {
-    for (int i = 0; i < 1858; ++i) p_[i] = computation.GetPVal(idx, i);
+    for (int i = 0; i < 3716; ++i) p_[i] = computation.GetPVal(idx, i);
     q_ = computation.GetQVal(idx);
     d_ = computation.GetDVal(idx);
     m_ = computation.GetMVal(idx);
@@ -146,8 +146,8 @@ class Output {
     std::vector<float> result(indicies.size());
     for (size_t i = 0; i < indicies.size(); ++i) {
       int idx = indicies[i];
-      if (idx < 0 || idx > 1857) {
-        throw Exception("Policy index must be between 0 and 1857.");
+      if (idx < 0 || idx > 3715) {
+        throw Exception("Policy index must be between 0 and 3715.");
       }
       result[i] = p_[idx];
     }
@@ -173,7 +173,7 @@ class Output {
   }
 
  private:
-  float p_[1858];
+  float p_[3716];
   float q_;
   float d_;
   float m_;

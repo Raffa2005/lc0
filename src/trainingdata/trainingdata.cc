@@ -162,7 +162,8 @@ void V6TrainingDataArray::Add(
       }
       total += P;
     }
-    result.probabilities[MoveToNNIndex(move, transform)] = fracv;
+    result.probabilities[MoveToNNIndex(move, transform) +
+                         (move.is_ability_activation() ? 1858 : 0)] = fracv;
   }
   if (nneval) {
     // Add small epsilon for backward compatibility with earlier value of 0.
@@ -213,6 +214,12 @@ void V6TrainingDataArray::Add(
   result.dummy = 0;
   result.rule50_count = position.GetRule50Ply();
 
+  // Double-move variant fields.
+  result.our_doublemove_available = position.OurDoublemoveAvailable() ? 1 : 0;
+  result.their_doublemove_available =
+      position.TheirDoublemoveAvailable() ? 1 : 0;
+  result.is_mid_doublemove = position.IsMidDoublemove() ? 1 : 0;
+
   // Game result is undecided.
   result.result_q = 0;
   result.result_d = 1;
@@ -257,8 +264,12 @@ void V6TrainingDataArray::Add(
     best_move.Flip();
     played_move.Flip();
   }
-  result.best_idx = MoveToNNIndex(best_move, transform);
-  result.played_idx = MoveToNNIndex(played_move, transform);
+  result.best_idx =
+      MoveToNNIndex(best_move, transform) +
+      (best_move.is_ability_activation() ? 1858 : 0);
+  result.played_idx =
+      MoveToNNIndex(played_move, transform) +
+      (played_move.is_ability_activation() ? 1858 : 0);
   result.q_st = 0.0f;
 
   // Unknown here - will be filled in once the full data has been collected.

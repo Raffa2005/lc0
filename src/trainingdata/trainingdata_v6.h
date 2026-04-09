@@ -37,7 +37,7 @@ namespace lczero {
 struct V6TrainingData {
   uint32_t version;
   uint32_t input_format;
-  float probabilities[1858];
+  float probabilities[3716];
   uint64_t planes[104];
   uint8_t castling_us_ooo;
   uint8_t castling_us_oo;
@@ -59,6 +59,10 @@ struct V6TrainingData {
   uint8_t invariance_info;
   // In versions prior to v6 this spot contained thr result as an int8_t.
   uint8_t dummy;
+  // Double-move variant fields.
+  uint8_t our_doublemove_available;
+  uint8_t their_doublemove_available;
+  uint8_t is_mid_doublemove;
   float root_q;
   float best_q;
   float root_d;
@@ -84,7 +88,7 @@ struct V6TrainingData {
   // Q standard deviation. Was uint32_t reserved in original v6.
   float q_st;
 } PACKED_STRUCT;
-static_assert(sizeof(V6TrainingData) == 8356, "Wrong struct size");
+static_assert(sizeof(V6TrainingData) == 15791, "Wrong struct size");
 
 #pragma pack(pop)
 

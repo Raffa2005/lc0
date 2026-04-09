@@ -94,11 +94,11 @@ const OptionId kDeleteFilesId{"delete-files", "",
 class PolicySubNode {
  public:
   PolicySubNode() {
-    for (int i = 0; i < 1858; i++) children[i] = nullptr;
+    for (int i = 0; i < 3716; i++) children[i] = nullptr;
   }
   bool active = false;
-  float policy[1858];
-  PolicySubNode* children[1858];
+  float policy[3716];
+  PolicySubNode* children[3716];
 };
 
 std::atomic<int> games(0);
@@ -203,8 +203,8 @@ void Validate(std::span<const FrameType> fileContents) {
     if (sum < 0.99f || sum > 1.01f) {
       throw Exception("Probability sum error is huge!");
     }
-    DataAssert(data.best_idx <= 1858);
-    DataAssert(data.played_idx <= 1858);
+    DataAssert(data.best_idx <= 3716);
+    DataAssert(data.played_idx <= 3716);
     DataAssert(data.played_q >= -1.0f && data.played_q <= 1.0f);
     DataAssert(data.played_d >= 0.0f && data.played_d <= 1.0f);
     DataAssert(data.played_m >= 0.0f);
@@ -362,7 +362,7 @@ void ChangeInputFormat(int newInputFormat, V6TrainingData* data,
 
   if ((data->invariance_info & 7) != transform) {
     // Probabilities need reshuffling.
-    float newProbs[1858];
+    float newProbs[3716];
     std::fill(std::begin(newProbs), std::end(newProbs), -1);
     bool played_fixed = false;
     bool best_fixed = false;
@@ -382,7 +382,7 @@ void ChangeInputFormat(int newInputFormat, V6TrainingData* data,
         }
       }
     }
-    for (int i = 0; i < 1858; i++) {
+    for (int i = 0; i < 3716; i++) {
       data->probabilities[i] = newProbs[i];
     }
   }
@@ -533,7 +533,7 @@ void ApplyPolicySubstitutions(FileData<FrameType>& data) {
     PolicySubNode* rootNode = &policy_subs[rootHash];
     for (size_t i = 0; i < data.fileContents.size(); i++) {
       if (rootNode->active) {
-        for (int j = 0; j < 1858; j++) {
+        for (int j = 0; j < 3716; j++) {
           data.fileContents[i].probabilities[j] = rootNode->policy[j];
         }
       }
@@ -729,7 +729,7 @@ void ApplyPolicyAdjustments(FileData<FrameType>& data, SyzygyTablebase* tablebas
 
   for (auto& chunk : data.fileContents) {
     const auto& board = history.Last().GetBoard();
-    std::vector<bool> boost_probs(1858, false);
+    std::vector<bool> boost_probs(3716, false);
     int boost_count = 0;
 
     if (dtzBoost != 0.0f && board.castlings().no_legal_castle() &&
@@ -1262,7 +1262,7 @@ void BuildSubs(const std::vector<std::string>& files) {
     for (size_t i = 0; i < fileContents.size(); i++) {
       if ((fileContents[i].invariance_info & 64) == 0) {
         rootNode->active = true;
-        for (int j = 0; j < 1858; j++) {
+        for (int j = 0; j < 3716; j++) {
           rootNode->policy[j] = fileContents[i].probabilities[j];
         }
       }

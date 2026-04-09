@@ -64,7 +64,7 @@ enum class OnnxProvider { CPU, CUDA, DML, ROCM, TRT, MIGRAPHX, COREML };
 
 class OnnxNetwork;
 
-static constexpr int kNumOutputPolicy = 1858;
+static constexpr int kNumOutputPolicy = 3716;
 
 struct InputsOutputs {
   InputsOutputs(OnnxNetwork* network);
