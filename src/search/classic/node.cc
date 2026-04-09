@@ -477,7 +477,14 @@ void NodeTree::MakeMove(Move move) {
   new_head = current_head_->child_.get();
   current_head_ =
       new_head ? new_head : current_head_->CreateSingleChildNode(move);
-  history_.Append(move);
+  // Double-move variant: ability-activation moves skip Mirror() so the same
+  // player moves again.
+  if (move.is_ability_activation()) {
+    history_.Append(move.WithoutAbilityActivation(),
+                    /*is_first_of_double=*/true);
+  } else {
+    history_.Append(move);
+  }
 }
 
 void NodeTree::TrimTreeAtHead() {

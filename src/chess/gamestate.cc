@@ -35,7 +35,13 @@ namespace lczero {
 Position GameState::CurrentPosition() const {
   return std::accumulate(
       moves.begin(), moves.end(), startpos,
-      [](const Position& pos, Move m) { return Position(pos, m); });
+      [](const Position& pos, Move m) {
+        if (m.is_ability_activation()) {
+          return Position(pos, m.WithoutAbilityActivation(),
+                          /*is_first_of_double=*/true);
+        }
+        return Position(pos, m);
+      });
 }
 
 std::vector<Position> GameState::GetPositions() const {
@@ -44,6 +50,11 @@ std::vector<Position> GameState::GetPositions() const {
   positions.push_back(startpos);
   std::transform(moves.begin(), moves.end(), std::back_inserter(positions),
                  [&](Move m) {
+                   if (m.is_ability_activation()) {
+                     return Position(positions.back(),
+                                     m.WithoutAbilityActivation(),
+                                     /*is_first_of_double=*/true);
+                   }
                    return Position(positions.back(), m);
                  });
   return positions;

@@ -257,7 +257,12 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
       PositionHistory history_copy = tree_[idx]->GetPositionHistory();
       Move move_for_history = move;
       if (tree_[idx]->IsBlackToMove()) move_for_history.Flip();
-      history_copy.Append(move_for_history);
+      if (move.is_ability_activation()) {
+        history_copy.Append(move_for_history.WithoutAbilityActivation(),
+                            /*is_first_of_double=*/true);
+      } else {
+        history_copy.Append(move_for_history);
+      }
       // Ensure not to discard games that are already decided.
       if (history_copy.ComputeGameResult() == GameResult::UNDECIDED) {
         auto move_list_to_discard = GetMoves();
@@ -299,10 +304,15 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
     search_.reset();
 
     // Add best move to the tree.
+    const bool is_ability = move.is_ability_activation();
     if (tree_[0]->IsBlackToMove()) move.Flip();
     tree_[0]->MakeMove(move);
     if (tree_[0] != tree_[1]) tree_[1]->MakeMove(move);
-    blacks_move = !blacks_move;
+    // Double-move variant: don't flip sides after ability activation — the
+    // same player moves again for their second move.
+    if (!is_ability) {
+      blacks_move = !blacks_move;
+    }
   }
 }
 
@@ -317,7 +327,13 @@ std::vector<Move> SelfPlayGame::GetMoves() const {
   while (!moves.empty()) {
     Move move = moves.back();
     moves.pop_back();
-    pos = Position(pos, move);
+    // Double-move variant: ability-activation moves don't flip perspective.
+    if (move.is_ability_activation()) {
+      pos = Position(pos, move.WithoutAbilityActivation(),
+                     /*is_first_of_double=*/true);
+    } else {
+      pos = Position(pos, move);
+    }
     // Position already flipped, therefore flip the move if white to move.
     if (!pos.IsBlackToMove()) move.Flip();
     result.push_back(move);
