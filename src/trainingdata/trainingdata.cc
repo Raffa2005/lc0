@@ -78,7 +78,9 @@ std::tuple<float, float> DriftCorrect(float q, float d) {
 }  // namespace
 
 void V6TrainingDataArray::Write(TrainingDataWriter* writer, GameResult result,
-                                bool adjudicated) const {
+                                bool adjudicated,
+                                std::optional<std::pair<float, float>> soft_wdl)
+    const {
   if (training_data_.empty()) return;
   // Base estimate off of best_m.  If needed external processing can use a
   // different approach.
@@ -89,7 +91,12 @@ void V6TrainingDataArray::Write(TrainingDataWriter* writer, GameResult result,
             chunk.input_format))) {
       black_to_move = (chunk.invariance_info & (1u << 7)) != 0;
     }
-    if (result == GameResult::WHITE_WON) {
+    if (soft_wdl) {
+      // Soft WDL from abilities-exhausted adjudication.
+      // soft_wdl->first is q from white's perspective.
+      chunk.result_q = black_to_move ? -soft_wdl->first : soft_wdl->first;
+      chunk.result_d = soft_wdl->second;
+    } else if (result == GameResult::WHITE_WON) {
       chunk.result_q = black_to_move ? -1 : 1;
       chunk.result_d = 0;
     } else if (result == GameResult::BLACK_WON) {

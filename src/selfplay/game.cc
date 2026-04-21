@@ -153,6 +153,34 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
       adjudicated_ = true;
       break;
     }
+
+    // Adjudicate when both players' double-move abilities are exhausted.
+    // The position is now standard chess — evaluate with the backend (which
+    // routes to the pretrained standard network via DualBackend) and record
+    // a soft WDL outcome for all preceding training positions.
+    {
+      const auto& last_pos = tree_[0]->GetPositionHistory().Last();
+      if (!last_pos.OurDoublemoveAvailable() &&
+          !last_pos.TheirDoublemoveAvailable() &&
+          !last_pos.IsMidDoublemove()) {
+        const int idx = blacks_move ? 1 : 0;
+        auto legal_moves = last_pos.GetBoard().GenerateLegalMoves();
+        EvalPosition eval_pos{
+            tree_[0]->GetPositionHistory().GetPositions(), legal_moves};
+        auto results =
+            options_[idx].backend->EvaluateBatch({&eval_pos, 1});
+        float q = results[0].q;  // Current side's perspective.
+        float d = results[0].d;
+        // Store q from white's perspective. The network evaluates from the
+        // current side's perspective, so flip if it's black's turn.
+        soft_result_q_ = blacks_move ? -q : q;
+        soft_result_d_ = d;
+        soft_adjudicated_ = true;
+        adjudicated_ = true;
+        game_result_ = GameResult::DRAW;
+        break;
+      }
+    }
     // Initialize search.
     const int idx = blacks_move ? 1 : 0;
     if (!options_[idx].uci_options->Get<bool>(kReuseTreeId)) {
@@ -327,6 +355,10 @@ std::vector<Move> SelfPlayGame::GetMoves() const {
   while (!moves.empty()) {
     Move move = moves.back();
     moves.pop_back();
+    // Record who is moving BEFORE advancing the position. Ability-activation
+    // moves don't change the side to move, so the post-move check that the
+    // original code used gives wrong results for those moves.
+    const bool blacks_move = pos.IsBlackToMove();
     // Double-move variant: ability-activation moves don't flip perspective.
     if (move.is_ability_activation()) {
       pos = Position(pos, move.WithoutAbilityActivation(),
@@ -334,8 +366,8 @@ std::vector<Move> SelfPlayGame::GetMoves() const {
     } else {
       pos = Position(pos, move);
     }
-    // Position already flipped, therefore flip the move if white to move.
-    if (!pos.IsBlackToMove()) move.Flip();
+    // Flip black's moves to standard (white-at-bottom) perspective.
+    if (blacks_move) move.Flip();
     result.push_back(move);
   }
   return result;
@@ -365,7 +397,12 @@ void SelfPlayGame::Abort() {
 }
 
 void SelfPlayGame::WriteTrainingData(TrainingDataWriter* writer) const {
-  training_data_.Write(writer, game_result_, adjudicated_);
+  if (soft_adjudicated_) {
+    training_data_.Write(writer, game_result_, adjudicated_,
+                         std::make_pair(soft_result_q_, soft_result_d_));
+  } else {
+    training_data_.Write(writer, game_result_, adjudicated_);
+  }
 }
 
 std::unique_ptr<classic::ChainedSearchStopper>

@@ -121,6 +121,12 @@ struct GameInfo {
   // if resign had of been enabled.
   // Only provided if the game wasn't played with resign enabled.
   std::optional<float> min_false_positive_threshold;
+  // True when the game was adjudicated because both abilities were exhausted.
+  bool soft_adjudicated = false;
+  // Soft WDL from standard-network evaluation (only valid when
+  // soft_adjudicated is true). q is from white's perspective in [-1, 1].
+  float soft_q = 0.0f;
+  float soft_d = 0.0f;
 
   using Callback = std::function<void(const GameInfo&)>;
 };
@@ -130,9 +136,11 @@ struct TournamentInfo {
   // Did tournament finish, so those results are final.
   bool finished = false;
 
-  // Player1's [win/draw/lose] as [white/black].
-  // e.g. results[2][1] is how many times player 1 lost as black.
-  int results[3][2] = {{0, 0}, {0, 0}, {0, 0}};
+  // Continuous score tracking for player1: [0] = as white, [1] = as black.
+  // Each game contributes a score in [0, 1]: 1=win, 0.5=draw, 0=loss.
+  // Soft-adjudicated games contribute (q+1)/2 where q is from P1's perspective.
+  float score_sum[2] = {0, 0};
+  int game_count[2] = {0, 0};
   int move_count_ = 0;
   uint64_t nodes_total_ = 0;
 

@@ -133,6 +133,7 @@ common_files += [
   'src/neural/backend.cc',
   'src/neural/batchsplit.cc',
   'src/neural/decoder.cc',
+  'src/neural/dual_backend.cc',
   'src/neural/encoder.cc',
   'src/neural/factory.cc',
   'src/neural/loader.cc',

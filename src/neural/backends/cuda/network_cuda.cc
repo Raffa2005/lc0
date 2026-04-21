@@ -134,13 +134,17 @@ class CudaNetworkComputation : public NetworkComputation {
   ~CudaNetworkComputation();
 
   void AddInput(InputPlanes&& input) override {
+    const int num_input_planes = network_->GetNumInputPlanes();
     const auto iter_mask =
-        &inputs_outputs_->input_masks_mem_[batch_size_ * kInputPlanes];
+        &inputs_outputs_->input_masks_mem_[batch_size_ * num_input_planes];
     const auto iter_val =
-        &inputs_outputs_->input_val_mem_[batch_size_ * kInputPlanes];
+        &inputs_outputs_->input_val_mem_[batch_size_ * num_input_planes];
 
-    assert(input.size() == kInputPlanes);
-    for (int i = 0; i < kInputPlanes; i++) {
+    // Input may have more planes than this network uses (e.g., 114-plane
+    // variant encoding fed to a 112-plane standard network). Copy only what
+    // this network needs; the extra planes are zeros for standard positions.
+    assert(static_cast<int>(input.size()) >= num_input_planes);
+    for (int i = 0; i < num_input_planes; i++) {
       const auto& plane = input[i];
       iter_mask[i] = plane.mask;
       ToType(iter_val[i], plane.value);
@@ -301,7 +305,6 @@ class CudaNetwork : public Network {
                                      // support it.
     }
 
-    const int kNumInputPlanes = kInputPlanes;
     const int kNumFilters = (int)weights.input.biases.size();
     numBlocks_ = (int)weights.residual.size();
     numFilters_ = kNumFilters;
@@ -310,6 +313,29 @@ class CudaNetwork : public Network {
     if (attn_body_) {
       assert(weights.ip_emb_b.size() > 0);
     }
+
+    // Detect actual number of input planes from network weights.
+    // This allows loading both 112-plane standard and 114-plane variant nets.
+    if (numBlocks_ > 0) {
+      num_input_planes_ =
+          (int)weights.input.weights.size() / (kNumFilters * 9);
+    } else if (attn_body_) {
+      const int d_model = (int)weights.ip_emb_b.size();
+      const int emb_input_c = (int)weights.ip_emb_w.size() / d_model;
+      const bool is_pe_dense =
+          static_cast<InputEmbedding>(
+              nf.input_embedding()) ==
+          InputEmbedding::INPUT_EMBEDDING_PE_DENSE;
+      if (is_pe_dense) {
+        const int dense_size = (int)weights.ip_emb_preproc_b.size() / 64;
+        num_input_planes_ = emb_input_c - dense_size;
+      } else {
+        num_input_planes_ = emb_input_c - kNumPosEncodingChannels;
+      }
+    } else {
+      num_input_planes_ = kInputPlanes;
+    }
+    const int kNumInputPlanes = num_input_planes_;
 
     // Warn if the memory required for storing transformed weights is
     // going to exceed 40% of total video memory, force custom_winograd off
@@ -493,7 +519,7 @@ class CudaNetwork : public Network {
 
       auto attention_body = std::make_unique<AttentionBody<DataType>>(
           weights, scratch_mem_, activations, numBlocks_,
-          numBlocks_ > 0 ? kNumFilters : kInputPlanes, max_batch_size_,
+          numBlocks_ > 0 ? kNumFilters : num_input_planes_, max_batch_size_,
           static_cast<InputEmbedding>(
               file.format().network_format().input_embedding()) ==
               InputEmbedding::INPUT_EMBEDDING_PE_DENSE,
@@ -635,11 +661,11 @@ class CudaNetwork : public Network {
     auto allocateCudaGraphs = [&] {
       ReportCUDAErrors(cudaSetDevice(gpu_id_));
       CudaNetworkComputation<DataType> comp(this, wdl_, moves_left_);
-      comp.AddInput(InputPlanes{(size_t)kNumInputPlanes});
+      comp.AddInput(InputPlanes{(size_t)num_input_planes_});
       // Make sure cublas is initialized in this thread.
       comp.ComputeBlocking();
       for (int i = 0; i < GetMiniBatchSize(); i++) {
-        comp.AddInput(InputPlanes{(size_t)kNumInputPlanes});
+        comp.AddInput(InputPlanes{(size_t)num_input_planes_});
         auto lock = LockEval();
         comp.CaptureGraph(std::move(lock));
       }
@@ -657,6 +683,7 @@ class CudaNetwork : public Network {
     }
   }
 
+  int GetNumInputPlanes() const { return num_input_planes_; }
   bool GetGraphCaptureEnabled() const { return enable_graph_capture_; }
 
   CudaGraphCapture<DataType> BeginCapture(InputsOutputs<DataType>& io) {
@@ -676,11 +703,11 @@ class CudaNetwork : public Network {
     if (multi_stream_) return;
     ReportCUDAErrors(
         cudaMemcpyAsync(io->input_masks_mem_gpu_, io->input_masks_mem_,
-                        batchSize * kInputPlanes * sizeof(uint64_t),
+                        batchSize * num_input_planes_ * sizeof(uint64_t),
                         cudaMemcpyHostToDevice, upload_stream_));
     ReportCUDAErrors(cudaMemcpyAsync(
         io->input_val_mem_gpu_, io->input_val_mem_,
-        batchSize * kInputPlanes * sizeof(io->input_val_mem_[0]),
+        batchSize * num_input_planes_ * sizeof(io->input_val_mem_[0]),
         cudaMemcpyHostToDevice, upload_stream_));
     ReportCUDAErrors(cudaEventRecord(io->upload_done_event_, upload_stream_));
     ReportCUDAErrors(
@@ -751,11 +778,11 @@ class CudaNetwork : public Network {
     if (multi_stream_ || CUDA_GRAPH_SUPPORTS_EXTERNAL_EVENTS) {
       ReportCUDAErrors(
           cudaMemcpyAsync(io->input_masks_mem_gpu_, io->input_masks_mem_,
-                          batchSize * kInputPlanes * sizeof(uint64_t),
+                          batchSize * num_input_planes_ * sizeof(uint64_t),
                           cudaMemcpyHostToDevice, upload_stream));
       ReportCUDAErrors(cudaMemcpyAsync(
           io->input_val_mem_gpu_, io->input_val_mem_,
-          batchSize * kInputPlanes * sizeof(io->input_val_mem_[0]),
+          batchSize * num_input_planes_ * sizeof(io->input_val_mem_[0]),
           cudaMemcpyHostToDevice, upload_stream));
       ReportCUDAErrors(cudaEventRecord(io->upload_done_event_, upload_stream));
       ReportCUDAErrors(
@@ -771,7 +798,7 @@ class CudaNetwork : public Network {
     }
 
     expandPlanes_NCHW(tensor_mem[0], ipDataMasks, ipDataValues,
-                      batchSize * kInputPlanes, compute_stream);
+                      batchSize * num_input_planes_, compute_stream);
 
     auto* opPol = io->op_policy_mem_gpu_;
     auto* opVal = io->op_value_mem_gpu_;
@@ -1110,6 +1137,7 @@ class CudaNetwork : public Network {
 
   int numBlocks_;
   int numFilters_;
+  int num_input_planes_;
   bool has_se_;
   bool conv_policy_;
   bool attn_policy_;

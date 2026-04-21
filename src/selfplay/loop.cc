@@ -85,10 +85,15 @@ void SelfPlayLoop::SendGameInfo(const GameInfo& info) {
   if (info.is_black)
     res += " player1 " + std::string(*info.is_black ? "black" : "white");
   if (info.game_result != GameResult::UNDECIDED) {
-    res += std::string(" result ") +
-           ((info.game_result == GameResult::DRAW)        ? "draw"
-            : (info.game_result == GameResult::WHITE_WON) ? "whitewon"
-                                                          : "blackwon");
+    if (info.soft_adjudicated) {
+      res += " result adjudicated q " + std::to_string(info.soft_q) +
+             " d " + std::to_string(info.soft_d);
+    } else {
+      res += std::string(" result ") +
+             ((info.game_result == GameResult::DRAW)        ? "draw"
+              : (info.game_result == GameResult::WHITE_WON) ? "whitewon"
+                                                            : "blackwon");
+    }
   }
   if (!info.moves.empty()) {
     res += " moves";
@@ -103,32 +108,27 @@ void SelfPlayLoop::SendGameInfo(const GameInfo& info) {
 }
 
 void SelfPlayLoop::SendTournament(const TournamentInfo& info) {
-  const int winp1 = info.results[0][0] + info.results[0][1];
-  const int losep1 = info.results[2][0] + info.results[2][1];
-  const int draws = info.results[1][0] + info.results[1][1];
+  const int total_games = info.game_count[0] + info.game_count[1];
+  const float total_score = info.score_sum[0] + info.score_sum[1];
 
-  // Initialize variables.
   float percentage = -1;
   std::optional<float> elo;
-  std::optional<float> los;
 
-  // Only caculate percentage if any games at all (avoid divide by 0).
-  if ((winp1 + losep1 + draws) > 0) {
-    percentage =
-        (static_cast<float>(draws) / 2 + winp1) / (winp1 + losep1 + draws);
+  // Calculate percentage if any games at all (avoid divide by 0).
+  if (total_games > 0) {
+    percentage = total_score / total_games;
   }
-  // Calculate elo and los if percentage strictly between 0 and 1 (avoids divide
-  // by 0 or overflow).
-  if ((percentage < 1) && (percentage > 0))
+  // Calculate Elo if percentage strictly between 0 and 1.
+  if (percentage > 0 && percentage < 1) {
     elo = -400 * log(1 / percentage - 1) / log(10);
-  if ((winp1 + losep1) > 0) {
-    los = .5f +
-          .5f * std::erf((winp1 - losep1) / std::sqrt(2.0 * (winp1 + losep1)));
   }
+
   std::ostringstream oss;
   oss << "tournamentstatus";
   if (info.finished) oss << " final";
-  oss << " P1: +" << winp1 << " -" << losep1 << " =" << draws;
+  oss << " P1: " << total_games << " games";
+  oss << " score " << std::fixed << std::setprecision(3) << total_score
+      << "/" << total_games;
 
   if (percentage > 0) {
     oss << " Win: " << std::fixed << std::setw(5) << std::setprecision(2)
@@ -138,15 +138,17 @@ void SelfPlayLoop::SendTournament(const TournamentInfo& info) {
     oss << " Elo: " << std::fixed << std::setw(5) << std::setprecision(2)
         << (*elo);
   }
-  if (los) {
-    oss << " LOS: " << std::fixed << std::setw(5) << std::setprecision(2)
-        << (*los * 100.0f) << "%";
-  }
 
-  oss << " P1-W: +" << info.results[0][0] << " -" << info.results[2][0] << " ="
-      << info.results[1][0];
-  oss << " P1-B: +" << info.results[0][1] << " -" << info.results[2][1] << " ="
-      << info.results[1][1];
+  auto avg = [](float sum, int count) {
+    return count > 0 ? sum / count : 0.0f;
+  };
+  oss << " P1-W: " << info.game_count[0] << " games"
+      << " avg " << std::fixed << std::setprecision(3)
+      << avg(info.score_sum[0], info.game_count[0]);
+  oss << " P1-B: " << info.game_count[1] << " games"
+      << " avg " << std::fixed << std::setprecision(3)
+      << avg(info.score_sum[1], info.game_count[1]);
+
   oss << " npm " + std::to_string(static_cast<double>(info.nodes_total_) /
                                   info.move_count_);
   oss << " nodes " + std::to_string(info.nodes_total_);

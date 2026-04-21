@@ -2174,7 +2174,7 @@ void AttentionBody<DataType>::Eval(int N, DataType* output,
 
   int inputC = input_c_;
   if (num_resi_blocks_ == 0) {
-    assert(inputC == kInputPlanes);
+    assert(inputC == input_c_);
     /*
       # if there are no residual blocks (pure transformer), do some input
       processing
@@ -2204,7 +2204,7 @@ void AttentionBody<DataType>::Eval(int N, DataType* output,
       addVectors(buffer1, buffer1, ip_emb_pre_b_, size, size, num_outputs,
                  ACTIVATION_NONE, stream);
       inputPreprocessForAttentionBody((DataType*)scratch, input, buffer1, N,
-                                      kInputPlanes, embedding_dense_size_, true,
+                                      input_c_, embedding_dense_size_, true,
                                       stream);
       inputC += embedding_dense_size_;
     } else {
@@ -2218,7 +2218,7 @@ void AttentionBody<DataType>::Eval(int N, DataType* output,
       axis=2)
       */
       inputPreprocessForAttentionBody((DataType*)scratch, input, pos_encoding_,
-                                      N, kInputPlanes, kNumPosEncodingChannels,
+                                      N, input_c_, kNumPosEncodingChannels,
                                       false, stream);
       inputC += kNumPosEncodingChannels;
     }

@@ -28,8 +28,10 @@
 #include "selfplay/tournament.h"
 
 #include <fstream>
+#include <map>
 
 #include "chess/pgn.h"
+#include "neural/dual_backend.h"
 #include "neural/memcache.h"
 #include "neural/shared_params.h"
 #include "search/classic/search.h"
@@ -97,6 +99,11 @@ const OptionId kSyzygyTablebaseId{
     "List of Syzygy tablebase directories, list entries separated by system "
     "separator (\";\" for Windows, \":\" for Linux).",
     's'};
+const OptionId kFallbackWeightsId{
+    "fallback-weights", "FallbackWeights",
+    "Path to a standard lc0 network used to evaluate positions where both "
+    "players have exhausted their double-move abilities. When set, each "
+    "backend is wrapped in a DualBackend that routes evaluations accordingly."};
 
 }  // namespace
 
@@ -136,6 +143,7 @@ void SelfPlayTournament::PopulateOptions(OptionsParser* options) {
   options->Add<ChoiceOption>(kOpeningsModeId, openings_modes) = "sequential";
 
   options->Add<StringOption>(kSyzygyTablebaseId);
+  options->Add<StringOption>(kFallbackWeightsId) = "";
   SelfPlayGame::PopulateUciParams(options);
 
   auto defaults = options->GetMutableDefaultsOptions();
@@ -231,6 +239,36 @@ SelfPlayTournament::SelfPlayTournament(const OptionsDict& options,
             CreateMemCache(BackendManager::Get()->CreateFromParams(opts),
                            options.GetSubdict(name));
         backend_list.emplace_back(backends_[name_idx][color_idx]);
+      }
+    }
+  }
+
+  // If fallback weights are specified, wrap each variant backend in a
+  // DualBackend that routes "abilities exhausted" positions to the standard
+  // pretrained network.
+  const std::string fallback_weights =
+      options.Get<std::string>(kFallbackWeightsId);
+  if (!fallback_weights.empty()) {
+    // Create options that override only the weights path, inheriting
+    // backend type, backend-opts, cache size, etc. from the top-level options.
+    OptionsDict fallback_opts(&options);
+    fallback_opts.Set<std::string>(SharedBackendParams::kWeightsId,
+                                   fallback_weights);
+    auto standard_backend = std::shared_ptr<Backend>(
+        CreateMemCache(BackendManager::Get()->CreateFromParams(fallback_opts),
+                       options));
+    CERR << "DualBackend: loaded fallback network from " << fallback_weights;
+
+    // Wrap each distinct variant backend, preserving shared_ptr dedup.
+    std::map<Backend*, std::shared_ptr<Backend>> replacements;
+    for (int i : {0, 1}) {
+      for (int j : {0, 1}) {
+        Backend* raw = backends_[i][j].get();
+        if (replacements.find(raw) == replacements.end()) {
+          replacements[raw] = std::make_shared<DualBackend>(
+              backends_[i][j], standard_backend);
+        }
+        backends_[i][j] = replacements[raw];
       }
     }
   }
@@ -398,6 +436,9 @@ void SelfPlayTournament::PlayOneGame(int game_number) {
     // Game callback.
     GameInfo game_info;
     game_info.game_result = game.GetGameResult();
+    game_info.soft_adjudicated = game.IsSoftAdjudicated();
+    game_info.soft_q = game.GetSoftResultQ();
+    game_info.soft_d = game.GetSoftResultD();
     game_info.is_black = player1_black;
     game_info.game_id = game_number;
     game_info.initial_fen = opening.start_fen;
@@ -419,11 +460,22 @@ void SelfPlayTournament::PlayOneGame(int game_number) {
     // Update tournament stats.
     {
       Mutex::Lock lock(mutex_);
-      int result = game.GetGameResult() == GameResult::DRAW        ? 1
-                   : game.GetGameResult() == GameResult::WHITE_WON ? 0
-                                                                   : 2;
-      if (player1_black) result = 2 - result;
-      ++tournament_info_.results[result][player1_black ? 1 : 0];
+      float score;
+      if (game.IsSoftAdjudicated()) {
+        // Continuous score from oracle evaluation.
+        float q = game.GetSoftResultQ();  // white's perspective
+        if (player1_black) q = -q;        // player1's perspective
+        score = (q + 1.0f) / 2.0f;
+      } else {
+        int result = game.GetGameResult() == GameResult::DRAW        ? 1
+                     : game.GetGameResult() == GameResult::WHITE_WON ? 0
+                                                                     : 2;
+        if (player1_black) result = 2 - result;
+        score = (result == 0) ? 1.0f : (result == 1) ? 0.5f : 0.0f;
+      }
+      int color_idx = player1_black ? 1 : 0;
+      tournament_info_.score_sum[color_idx] += score;
+      tournament_info_.game_count[color_idx]++;
       tournament_info_.move_count_ += game.move_count_;
       tournament_info_.nodes_total_ += game.nodes_total_;
       tournament_callback_(tournament_info_);
@@ -497,10 +549,11 @@ void SelfPlayTournament::PlayMultiGames(int game_id, size_t game_count) {
       // Update tournament stats.
       {
         Mutex::Lock lock(mutex_);
-        int result = game1_res == GameResult::DRAW        ? 1
-                     : game1_res == GameResult::WHITE_WON ? 0
-                                                          : 2;
-        ++tournament_info_.results[result][0];
+        float score = game1_res == GameResult::DRAW      ? 0.5f
+                      : game1_res == GameResult::WHITE_WON ? 1.0f
+                                                           : 0.0f;
+        tournament_info_.score_sum[0] += score;
+        tournament_info_.game_count[0]++;
         tournament_callback_(tournament_info_);
       }
     }
@@ -519,10 +572,12 @@ void SelfPlayTournament::PlayMultiGames(int game_id, size_t game_count) {
       // Update tournament stats.
       {
         Mutex::Lock lock(mutex_);
-        int result = game2_res == GameResult::DRAW        ? 1
-                     : game2_res == GameResult::WHITE_WON ? 2
-                                                          : 0;
-        ++tournament_info_.results[result][1];
+        // In game2, player1 is black.
+        float score = game2_res == GameResult::DRAW       ? 0.5f
+                      : game2_res == GameResult::WHITE_WON ? 0.0f
+                                                           : 1.0f;
+        tournament_info_.score_sum[1] += score;
+        tournament_info_.game_count[1]++;
         tournament_callback_(tournament_info_);
       }
     }
@@ -654,15 +709,13 @@ void SelfPlayTournament::SaveResults() {
   output << std::endl;
   output << "[White \"" << p1name << "\"]" << std::endl;
   output << "[Black \"" << p2name << "\"]" << std::endl;
-  output << "[Results \"" << tournament_info_.results[0][0] << " "
-         << tournament_info_.results[2][0] << " "
-         << tournament_info_.results[1][0] << "\"]" << std::endl;
+  output << "[Results \"" << tournament_info_.score_sum[0] << "/"
+         << tournament_info_.game_count[0] << "\"]" << std::endl;
   output << std::endl;
   output << "[White \"" << p2name << "\"]" << std::endl;
   output << "[Black \"" << p1name << "\"]" << std::endl;
-  output << "[Results \"" << tournament_info_.results[2][1] << " "
-         << tournament_info_.results[0][1] << " "
-         << tournament_info_.results[1][1] << "\"]" << std::endl;
+  output << "[Results \"" << tournament_info_.score_sum[1] << "/"
+         << tournament_info_.game_count[1] << "\"]" << std::endl;
 }
 
 }  // namespace lczero

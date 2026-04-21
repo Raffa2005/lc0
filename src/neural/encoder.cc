@@ -275,7 +275,7 @@ InputPlanes EncodePositionForNN(
     // Canonical v2 only writes an item if it is a repeat, unless its the most
     // recent position.
     if (skip_non_repeats && repetitions == 0 && i > 0) {
-      if (history_idx > 0) flip = !flip;
+      if (history_idx > 0 && !position.IsMidDoublemove()) flip = !flip;
       // If no capture no pawn is 0, the previous was start of game, capture or
       // pawn push, so there can't be any more repeats that are worth
       // considering.
@@ -314,7 +314,10 @@ InputPlanes EncodePositionForNN(
             ((0x0001000000000000ULL - 0x0000000100000000ULL) << (idx - 56));
       }
     }
-    if (history_idx > 0) flip = !flip;
+    // Double-move variant: only toggle flip when the perspective actually
+    // changed.  Mid-double-move positions were constructed without Mirror(),
+    // so the perspective is the same as their parent.
+    if (history_idx > 0 && !position.IsMidDoublemove()) flip = !flip;
     // If no capture no pawn is 0, the previous was start of game, capture or
     // pawn push, so no need to go back further if stopping early.
     if (stop_early && position.GetRule50Ply() == 0) break;

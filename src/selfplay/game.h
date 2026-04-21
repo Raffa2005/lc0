@@ -89,6 +89,9 @@ class SelfPlayGame {
   void WriteTrainingData(TrainingDataWriter* writer) const;
 
   GameResult GetGameResult() const { return game_result_; }
+  bool IsSoftAdjudicated() const { return soft_adjudicated_; }
+  float GetSoftResultQ() const { return soft_result_q_; }
+  float GetSoftResultD() const { return soft_result_d_; }
   std::vector<Move> GetMoves() const;
   // Gets the eval which required the biggest swing up to get the final outcome.
   // Eval is the expected outcome in the range 0<->1.
@@ -111,6 +114,10 @@ class SelfPlayGame {
   bool abort_ = false;
   GameResult game_result_ = GameResult::UNDECIDED;
   bool adjudicated_ = false;
+  // Soft WDL from standard-network evaluation when both abilities exhausted.
+  bool soft_adjudicated_ = false;
+  float soft_result_q_ = 0.0f;  // From white's perspective.
+  float soft_result_d_ = 1.0f;
   // Track minimum eval for each player so that GetWorstEvalForWinnerOrDraw()
   // can be calculated after end of game.
   float min_eval_[2] = {1.0f, 1.0f};

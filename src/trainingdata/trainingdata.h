@@ -27,6 +27,9 @@
 
 #pragma once
 
+#include <optional>
+#include <utility>
+
 #include "neural/backend.h"
 #include "search/classic/node.h"
 #include "trainingdata/writer.h"
@@ -49,9 +52,12 @@ class V6TrainingDataArray {
            std::span<Move> legal_moves,
            const std::optional<EvalResult>& nneval, float policy_softmax_temp);
 
-  // Writes training data to a file.
-  void Write(TrainingDataWriter* writer, GameResult result,
-             bool adjudicated) const;
+  // Writes training data to a file. When soft_wdl is provided (from
+  // abilities-exhausted adjudication), it is used as the game outcome instead
+  // of the binary result. soft_wdl is {q, d} from white's perspective.
+  void Write(TrainingDataWriter* writer, GameResult result, bool adjudicated,
+             std::optional<std::pair<float, float>> soft_wdl = std::nullopt)
+      const;
 
  private:
   std::vector<V6TrainingData> training_data_;

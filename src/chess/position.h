@@ -79,6 +79,12 @@ class Position {
   bool TheirDoublemoveAvailable() const { return their_doublemove_available_; }
   bool IsMidDoublemove() const { return is_mid_doublemove_; }
 
+  // Override the initial ability state (used for curriculum training).
+  void SetDoublemoveAvailable(bool ours, bool theirs) {
+    our_doublemove_available_ = ours;
+    their_doublemove_available_ = theirs;
+  }
+
   bool operator==(const Position&) const = default;
   bool operator!=(const Position&) const = default;
 
@@ -124,6 +130,7 @@ class PositionHistory {
 
   // Returns first position of the game (or fen from which it was initialized).
   const Position& Starting() const { return positions_.front(); }
+  Position& MutableStarting() { return positions_.front(); }
 
   // Returns the latest position of the game.
   const Position& Last() const { return positions_.back(); }

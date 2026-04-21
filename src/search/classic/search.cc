@@ -2306,10 +2306,11 @@ void SearchWorker::DoBackupUpdateSingleNode(
         update_parent_bounds && p != search_->root_node_ && !p->IsTerminal() &&
         MaybeSetBounds(p, m, &n_to_fix, &v_delta, &d_delta, &m_delta);
 
-    // Q will be flipped for opponent — unless this node was reached via an
-    // ability-activation edge, meaning the same player moves at both n and p.
+    // Q will be flipped for opponent — unless p was reached via an
+    // ability-activation edge from its own parent, meaning p and its parent
+    // are the same player (so no perspective change is needed going up).
     const bool same_player =
-        p->GetEdgeToNode(n)->GetMove().is_ability_activation();
+        p->GetParent() && p->GetOwnEdge()->GetMove().is_ability_activation();
     if (!same_player) {
       v = -v;
       v_delta = -v_delta;

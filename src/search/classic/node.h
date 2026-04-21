@@ -660,6 +660,10 @@ class NodeTree {
   Node* GetCurrentHead() const { return current_head_; }
   Node* GetGameBeginNode() const { return gamebegin_node_.get(); }
   const PositionHistory& GetPositionHistory() const { return history_; }
+  // Override the starting position's ability flags (for curriculum training).
+  void SetStartingAbilities(bool white_has, bool black_has) {
+    history_.MutableStarting().SetDoublemoveAvailable(white_has, black_has);
+  }
 
  private:
   void DeallocateTree();
