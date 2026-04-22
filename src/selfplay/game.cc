@@ -29,6 +29,7 @@
 
 #include <algorithm>
 
+#include "chess/gamestate.h"
 #include "search/classic/stoppers/common.h"
 #include "search/classic/stoppers/factory.h"
 #include "utils/random.h"
@@ -155,26 +156,63 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
     }
 
     // Adjudicate when both players' double-move abilities are exhausted.
-    // The position is now standard chess — evaluate with the backend (which
-    // routes to the pretrained standard network via DualBackend) and record
-    // a soft WDL outcome for all preceding training positions.
+    // The position is now standard chess. We:
+    //   1. Build a fresh PositionHistory from the current FEN, dropping the
+    //      mid-doublemove perspective frames that pollute the encoded
+    //      8-history-slot piece planes (the standard pretrained network was
+    //      not trained on those patterns; measured ~0.4 q drift between
+    //      FEN-only history and the polluted 22-ply history).
+    //   2. Run a real MCTS search through the dual backend so terminal /
+    //      forced-mate detection kicks in via tree bounds — a single forward
+    //      pass cannot prove mate-in-N for any N.
     {
       const auto& last_pos = tree_[0]->GetPositionHistory().Last();
       if (!last_pos.OurDoublemoveAvailable() &&
           !last_pos.TheirDoublemoveAvailable() &&
           !last_pos.IsMidDoublemove()) {
         const int idx = blacks_move ? 1 : 0;
-        auto legal_moves = last_pos.GetBoard().GenerateLegalMoves();
-        EvalPosition eval_pos{
-            tree_[0]->GetPositionHistory().GetPositions(), legal_moves};
-        auto results =
-            options_[idx].backend->EvaluateBatch({&eval_pos, 1});
-        float q = results[0].q;  // Current side's perspective.
-        float d = results[0].d;
-        // Store q from white's perspective. The network evaluates from the
-        // current side's perspective, so flip if it's black's turn.
-        soft_result_q_ = blacks_move ? -q : q;
-        soft_result_d_ = d;
+
+        // Build a clean tree on a single-position history.
+        GameState clean_state{Position::FromFen(PositionToFen(last_pos)), {}};
+        classic::NodeTree adj_tree;
+        adj_tree.ResetToPosition(clean_state);
+        adj_tree.SetStartingAbilities(/*white_has=*/false,
+                                      /*black_has=*/false);
+
+        // Disable Dirichlet noise for adjudication; sticky_endgames stays at
+        // its configured default so terminal bounds propagate.
+        OptionsDict adj_options(options_[idx].uci_options);
+        adj_options.Set<float>(classic::SearchParams::kNoiseEpsilonId, 0.0f);
+
+        auto stoppers = options_[idx].search_limits.MakeSearchStopper();
+        classic::PopulateIntrinsicStoppers(stoppers.get(), adj_options);
+        auto responder = std::make_unique<CallbackUciResponder>(
+            [](const BestMoveInfo&) {},
+            [](const std::vector<ThinkingInfo>&) {});
+
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          if (abort_) break;
+          search_ = std::make_unique<classic::Search>(
+              adj_tree, options_[idx].backend, std::move(responder),
+              /* searchmoves */ MoveList(), std::chrono::steady_clock::now(),
+              std::move(stoppers), /* infinite */ false, /* ponder */ false,
+              adj_options, syzygy_tb);
+        }
+        search_->RunBlocking(blacks_move ? black_threads : white_threads);
+        nodes_total_ += search_->GetTotalPlayouts();
+        if (abort_) break;
+
+        Move best_move;
+        bool best_is_terminal;
+        const auto best_eval =
+            search_->GetBestEval(&best_move, &best_is_terminal);
+        search_.reset();
+
+        // Store q/d from white's perspective. Search returns from current
+        // side's perspective; flip if it's black's turn.
+        soft_result_q_ = blacks_move ? -best_eval.wl : best_eval.wl;
+        soft_result_d_ = best_eval.d;
         soft_adjudicated_ = true;
         adjudicated_ = true;
         game_result_ = GameResult::DRAW;
