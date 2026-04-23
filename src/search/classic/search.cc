@@ -2347,55 +2347,65 @@ bool SearchWorker::MaybeSetBounds(Node* p, float m, int* n_to_fix,
   auto losing_m = 0.0f;
   auto prefer_tb = false;
 
-  // Determine the maximum (lower, upper) bounds across all children.
-  // (-1,-1) Loss (initial and lowest bounds)
-  // (-1, 0) Can't Win
-  // (-1, 1) Regular node
-  // ( 0, 0) Draw
-  // ( 0, 1) Can't Lose
-  // ( 1, 1) Win (highest bounds)
-  auto lower = GameResult::BLACK_WON;
-  auto upper = GameResult::BLACK_WON;
+  // Aggregate (lower, upper) bounds across p's children, expressed in p's own
+  // perspective. Bound encoding (in the to-move side's perspective):
+  //   (-1,-1) Loss (initial and lowest)
+  //   (-1, 0) Can't Win
+  //   (-1, 1) Regular
+  //   ( 0, 0) Draw
+  //   ( 0, 1) Can't Lose
+  //   ( 1, 1) Win (highest)
+  //
+  // Each edge's stored bound is in the CHILD's to-move perspective. For a
+  // normal edge the child is the opposite side, so the bound flips when we
+  // re-express it in p's perspective. For an ability-activation edge the
+  // child is the same side (the move skipped Mirror), so the bound passes
+  // through unchanged. Computing perspective per-edge is required because a
+  // node where the ability is still available has BOTH kinds of edges among
+  // its children, and aggregating then flipping at the end mixes
+  // perspectives. (Codex's earlier attempt only flipped based on p's
+  // incoming edge — that handled mid-double propagation but missed this.)
+  auto p_lower = GameResult::BLACK_WON;
+  auto p_upper = GameResult::BLACK_WON;
   for (const auto& edge : p->Edges()) {
-    const auto [edge_lower, edge_upper] = edge.GetBounds();
-    lower = std::max(edge_lower, lower);
-    upper = std::max(edge_upper, upper);
+    const auto [c_lower, c_upper] = edge.GetBounds();
+    GameResult e_lower, e_upper;
+    if (edge.GetMove().is_ability_activation()) {
+      e_lower = c_lower;
+      e_upper = c_upper;
+    } else {
+      e_lower = -c_upper;
+      e_upper = -c_lower;
+    }
+    p_lower = std::max(e_lower, p_lower);
+    p_upper = std::max(e_upper, p_upper);
 
-    // Checkmate is the best, so short-circuit.
+    // p winning through some edge is the best, so short-circuit.
     const auto is_tb = edge.IsTbTerminal();
-    if (edge_lower == GameResult::WHITE_WON && !is_tb) {
+    if (e_lower == GameResult::WHITE_WON && !is_tb) {
       prefer_tb = false;
       break;
-    } else if (edge_upper == GameResult::BLACK_WON) {
+    } else if (e_upper == GameResult::BLACK_WON) {
       // Track the longest loss.
       losing_m = std::max(losing_m, edge.GetM(0.0f));
     }
     prefer_tb = prefer_tb || is_tb;
   }
 
-  // The parent's bounds are flipped from the children (-max(U), -max(L))
-  // aggregated as if it was a single child (forced move) of the same bound.
-  //       Loss (-1,-1) -> ( 1, 1) Win
-  //  Can't Win (-1, 0) -> ( 0, 1) Can't Lose
-  //    Regular (-1, 1) -> (-1, 1) Regular
-  //       Draw ( 0, 0) -> ( 0, 0) Draw
-  // Can't Lose ( 0, 1) -> (-1, 0) Can't Win
-  //        Win ( 1, 1) -> (-1,-1) Loss
-
-  // Nothing left to do for ancestors if the parent would be a regular node.
-  if (lower == GameResult::BLACK_WON && upper == GameResult::WHITE_WON) {
+  // Nothing left to do for ancestors if p would be a regular node.
+  if (p_lower == GameResult::BLACK_WON && p_upper == GameResult::WHITE_WON) {
     return false;
-  } else if (lower == upper) {
-    // Search can stop at the parent if the bounds can't change anymore, so make
-    // it terminal preferring shorter wins and longer losses.
+  } else if (p_lower == p_upper) {
+    // Search can stop at p if the bounds can't change anymore, so make it
+    // terminal preferring shorter wins and longer losses.
     *n_to_fix = p->GetN();
     assert(*n_to_fix > 0);
     float cur_v = p->GetWL();
     float cur_d = p->GetD();
     float cur_m = p->GetM();
     p->MakeTerminal(
-        -upper,
-        (upper == GameResult::BLACK_WON ? std::max(losing_m, m) : m) + 1.0f,
+        p_upper,
+        (p_upper == GameResult::BLACK_WON ? std::max(losing_m, m) : m) + 1.0f,
         prefer_tb ? Node::Terminal::Tablebase : Node::Terminal::EndOfGame);
     // Negate v_delta because we're calculating for the parent, but immediately
     // afterwards we'll negate v_delta in case it has come from the child.
@@ -2403,7 +2413,7 @@ bool SearchWorker::MaybeSetBounds(Node* p, float m, int* n_to_fix,
     *d_delta = p->GetD() - cur_d;
     *m_delta = p->GetM() - cur_m;
   } else {
-    p->SetBounds(-upper, -lower);
+    p->SetBounds(p_lower, p_upper);
   }
 
   // Bounds were set, so indicate we should check the parent too.
