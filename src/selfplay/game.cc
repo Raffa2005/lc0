@@ -81,7 +81,8 @@ void SelfPlayGame::PopulateUciParams(OptionsParser* options) {
 }
 
 SelfPlayGame::SelfPlayGame(PlayerOptions white, PlayerOptions black,
-                           bool shared_tree, const Opening& opening)
+                           bool shared_tree, const Opening& opening,
+                           bool white_has_ability, bool black_has_ability)
     : options_{white, black},
       chess960_{white.uci_options->Get<bool>(kUciChess960) ||
                 black.uci_options->Get<bool>(kUciChess960)},
@@ -91,12 +92,14 @@ SelfPlayGame::SelfPlayGame(PlayerOptions white, PlayerOptions black,
   orig_fen_ = opening.start_fen;
   tree_[0] = std::make_shared<classic::NodeTree>();
   tree_[0]->ResetToPosition(orig_fen_, {});
+  tree_[0]->SetStartingAbilities(white_has_ability, black_has_ability);
 
   if (shared_tree) {
     tree_[1] = tree_[0];
   } else {
     tree_[1] = std::make_shared<classic::NodeTree>();
     tree_[1]->ResetToPosition(orig_fen_, {});
+    tree_[1]->SetStartingAbilities(white_has_ability, black_has_ability);
   }
   int ply = 0;
   auto white_prob = white.uci_options->Get<float>(kOpeningStopProbId);
@@ -167,7 +170,15 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
     //      pass cannot prove mate-in-N for any N.
     {
       const auto& last_pos = tree_[0]->GetPositionHistory().Last();
-      if (!last_pos.OurDoublemoveAvailable() &&
+      // Diagnostic exception: if the GAME STARTED with both abilities already
+      // exhausted (ability-mode=no-ability), don't adjudicate — play the
+      // game out as standard chess so we can observe move quality directly.
+      const auto& start_pos = tree_[0]->GetPositionHistory().Starting();
+      const bool started_without_abilities =
+          !start_pos.OurDoublemoveAvailable() &&
+          !start_pos.TheirDoublemoveAvailable();
+      if (!started_without_abilities &&
+          !last_pos.OurDoublemoveAvailable() &&
           !last_pos.TheirDoublemoveAvailable() &&
           !last_pos.IsMidDoublemove()) {
         const int idx = blacks_move ? 1 : 0;

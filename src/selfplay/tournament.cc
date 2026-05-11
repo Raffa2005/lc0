@@ -104,6 +104,11 @@ const OptionId kFallbackWeightsId{
     "Path to a standard lc0 network used to evaluate positions where both "
     "players have exhausted their double-move abilities. When set, each "
     "backend is wrapped in a DualBackend that routes evaluations accordingly."};
+const OptionId kAbilityModeId{
+  "ability-mode", "AbilityMode",
+  "Controls which side starts with double-move ability enabled. Choices: "
+  "normal, player1-no-ability, player2-no-ability, white-no-ability, "
+  "black-no-ability."};
 
 }  // namespace
 
@@ -144,6 +149,10 @@ void SelfPlayTournament::PopulateOptions(OptionsParser* options) {
 
   options->Add<StringOption>(kSyzygyTablebaseId);
   options->Add<StringOption>(kFallbackWeightsId) = "";
+  std::vector<std::string> ability_modes = {
+      "normal",       "player1-no-ability", "player2-no-ability",
+      "white-no-ability", "black-no-ability", "no-ability"};
+  options->Add<ChoiceOption>(kAbilityModeId, ability_modes) = "normal";
   SelfPlayGame::PopulateUciParams(options);
 
   auto defaults = options->GetMutableDefaultsOptions();
@@ -185,7 +194,8 @@ SelfPlayTournament::SelfPlayTournament(const OptionsDict& options,
       kValueGamesSize(options.Get<int>(kValueModeSizeId)),
       kTournamentResultsFile(
           options.Get<std::string>(kTournamentResultsFileId)),
-      kDiscardedStartChance(options.Get<float>(kDiscardedStartChanceId)) {
+        kDiscardedStartChance(options.Get<float>(kDiscardedStartChanceId)),
+        kAbilityMode(options.Get<std::string>(kAbilityModeId)) {
   multi_games_size_ = std::max(kPolicyGamesSize, kValueGamesSize);
   std::string book = options.Get<std::string>(kOpeningsFileId);
   if (!book.empty()) {
@@ -337,6 +347,32 @@ void SelfPlayTournament::PlayOneGame(int game_number) {
     }
   }
   const int color_idx[2] = {player1_black ? 1 : 0, player1_black ? 0 : 1};
+  bool white_has_ability = true;
+  bool black_has_ability = true;
+
+  if (kAbilityMode == "player1-no-ability") {
+    if (player1_black) {
+      black_has_ability = false;
+    } else {
+      white_has_ability = false;
+    }
+  } else if (kAbilityMode == "player2-no-ability") {
+    if (player1_black) {
+      white_has_ability = false;
+    } else {
+      black_has_ability = false;
+    }
+  } else if (kAbilityMode == "white-no-ability") {
+    white_has_ability = false;
+  } else if (kAbilityMode == "black-no-ability") {
+    black_has_ability = false;
+  } else if (kAbilityMode == "no-ability") {
+    // Diagnostic mode: both players start without the ability. Used to test
+    // how the variant network handles pure-standard-chess positions
+    // (planes 112/113 = 0 from move 1, like standard lc0 inputs).
+    white_has_ability = false;
+    black_has_ability = false;
+  }
 
   PlayerOptions options[2];
 
@@ -415,7 +451,9 @@ void SelfPlayTournament::PlayOneGame(int game_number) {
   {
     Mutex::Lock lock(mutex_);
     games_.emplace_front(std::make_unique<SelfPlayGame>(options[0], options[1],
-                                                        kShareTree, opening));
+                                                        kShareTree, opening,
+                                                        white_has_ability,
+                                                        black_has_ability));
     game_iter = games_.begin();
     syzygy_tb = syzygy_tb_.get();
   }

@@ -70,7 +70,8 @@ class SelfPlayGame {
   // (useful for training games). Otherwise the tree is separate for black
   // and white (useful i.e. when they use different networks).
   SelfPlayGame(PlayerOptions white, PlayerOptions black, bool shared_tree,
-               const Opening& opening);
+               const Opening& opening, bool white_has_ability = true,
+               bool black_has_ability = true);
 
   // Populate command line options that it uses.
   static void PopulateUciParams(OptionsParser* options);
