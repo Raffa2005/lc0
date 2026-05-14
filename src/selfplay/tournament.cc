@@ -108,7 +108,11 @@ const OptionId kAbilityModeId{
   "ability-mode", "AbilityMode",
   "Controls which side starts with double-move ability enabled. Choices: "
   "normal, player1-no-ability, player2-no-ability, white-no-ability, "
-  "black-no-ability."};
+  "black-no-ability, no-ability, random-asymmetric."};
+const OptionId kAsymmetricRateId{
+    "asymmetric-rate", "AsymmetricRate",
+    "Probability used by ability-mode=random-asymmetric to start a game with "
+    "exactly one side lacking the double-move ability."};
 
 }  // namespace
 
@@ -150,9 +154,11 @@ void SelfPlayTournament::PopulateOptions(OptionsParser* options) {
   options->Add<StringOption>(kSyzygyTablebaseId);
   options->Add<StringOption>(kFallbackWeightsId) = "";
   std::vector<std::string> ability_modes = {
-      "normal",       "player1-no-ability", "player2-no-ability",
-      "white-no-ability", "black-no-ability", "no-ability"};
+      "normal",          "player1-no-ability", "player2-no-ability",
+      "white-no-ability","black-no-ability",   "no-ability",
+      "random-asymmetric"};
   options->Add<ChoiceOption>(kAbilityModeId, ability_modes) = "normal";
+  options->Add<FloatOption>(kAsymmetricRateId, 0.0f, 1.0f) = 0.0f;
   SelfPlayGame::PopulateUciParams(options);
 
   auto defaults = options->GetMutableDefaultsOptions();
@@ -195,7 +201,8 @@ SelfPlayTournament::SelfPlayTournament(const OptionsDict& options,
       kTournamentResultsFile(
           options.Get<std::string>(kTournamentResultsFileId)),
         kDiscardedStartChance(options.Get<float>(kDiscardedStartChanceId)),
-        kAbilityMode(options.Get<std::string>(kAbilityModeId)) {
+        kAbilityMode(options.Get<std::string>(kAbilityModeId)),
+        kAsymmetricRate(options.Get<float>(kAsymmetricRateId)) {
   multi_games_size_ = std::max(kPolicyGamesSize, kValueGamesSize);
   std::string book = options.Get<std::string>(kOpeningsFileId);
   if (!book.empty()) {
@@ -372,6 +379,14 @@ void SelfPlayTournament::PlayOneGame(int game_number) {
     // (planes 112/113 = 0 from move 1, like standard lc0 inputs).
     white_has_ability = false;
     black_has_ability = false;
+  } else if (kAbilityMode == "random-asymmetric") {
+    if (Random::Get().GetFloat(1.0f) < kAsymmetricRate) {
+      if (Random::Get().GetBool()) {
+        white_has_ability = false;
+      } else {
+        black_has_ability = false;
+      }
+    }
   }
 
   PlayerOptions options[2];

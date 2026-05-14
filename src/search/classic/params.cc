@@ -525,6 +525,13 @@ const OptionId BaseSearchParams::kUCIRatingAdvId{
 const OptionId BaseSearchParams::kSearchSpinBackoffId{
     "search-spin-backoff", "SearchSpinBackoff",
     "Enable backoff for the spin lock that acquires available searcher."};
+const OptionId BaseSearchParams::kDisableAbilityEdgesId{
+    {.long_flag = "disable-ability-edges",
+     .uci_option = "DisableAbilityEdges",
+     .help_text =
+         "Diagnostic mode for the double-move variant: keep ability planes "
+         "encoded, but do not add ability-activation edges to the search tree.",
+     .visibility = OptionId::kProOnly}};
 const OptionId BaseSearchParams::kGarbageCollectionDelayId{
     "garbage-collection-delay", "GarbageCollectionDelay",
     "The percentage of expected move time until garbage collection start. "
@@ -630,6 +637,7 @@ void BaseSearchParams::Populate(OptionsParser* options) {
   options->Add<StringOption>(kUCIOpponentId);
   options->Add<FloatOption>(kUCIRatingAdvId, -10000.0f, 10000.0f) = 0.0f;
   options->Add<BoolOption>(kSearchSpinBackoffId) = false;
+  options->Add<BoolOption>(kDisableAbilityEdgesId) = false;
   options->Add<FloatOption>(kGarbageCollectionDelayId, 0.0f, 100.0f) = 10.0f;
 }
 
@@ -725,6 +733,7 @@ BaseSearchParams::BaseSearchParams(const OptionsDict& options)
       kMaxCollisionVisitsScalingPower(
           options.Get<float>(kMaxCollisionVisitsScalingPowerId)),
       kSearchSpinBackoff(options_.Get<bool>(kSearchSpinBackoffId)),
+      kDisableAbilityEdges(options_.Get<bool>(kDisableAbilityEdgesId)),
       kGarbageCollectionDelay(options_.Get<float>(kGarbageCollectionDelayId)) {}
 
 SearchParams::SearchParams(const OptionsDict& options)

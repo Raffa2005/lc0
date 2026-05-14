@@ -138,6 +138,15 @@ message Weights {
     // Convolutions for legacy policy head.
     optional ConvBlock policy1 = 10;
     optional ConvBlock policy = 11;
+    optional Layer ip_pol_gate_w = 12;
+    optional Layer ip_pol_gate_b = 13;
+    optional Layer ip2_pol_gate_w = 14;
+    optional Layer ip2_pol_gate_b = 15;
+    optional Layer ip2_pol_ab_w = 16;
+    optional Layer ip2_pol_ab_b = 17;
+    optional Layer ip3_pol_ab_w = 18;
+    optional Layer ip3_pol_ab_b = 19;
+    optional Layer ip4_pol_ab_w = 20;
   }
 
   message ValueHead {

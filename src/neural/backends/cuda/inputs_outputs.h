@@ -72,6 +72,7 @@ struct CudaGraphExec {
 template <typename DataType>
 struct InputsOutputs {
   InputsOutputs(unsigned maxBatchSize, bool wdl, bool moves_left,
+                int gate_hidden_size = 0,
                 size_t tensor_mem_size = 0, size_t scratch_size = 0,
                 bool cublasDisableTensorCores = false) {
     ReportCUDAErrors(cudaHostAlloc(
@@ -98,6 +99,14 @@ struct InputsOutputs {
     ReportCUDAErrors(cudaMalloc(
         &op_policy_mem_gpu_,
         maxBatchSize * kNumOutputPolicy * sizeof(op_policy_mem_[0])));
+    if (gate_hidden_size > 0) {
+      ReportCUDAErrors(cudaHostAlloc(
+          &op_gate_mem_,
+          maxBatchSize * gate_hidden_size * sizeof(op_gate_mem_[0]), 0));
+      ReportCUDAErrors(cudaMalloc(
+          &op_gate_mem_gpu_,
+          maxBatchSize * gate_hidden_size * sizeof(op_gate_mem_gpu_[0])));
+    }
     ReportCUDAErrors(cudaHostAlloc(
         &op_value_mem_, maxBatchSize * (wdl ? 3 : 1) * sizeof(op_value_mem_[0]),
         cudaHostAllocMapped));
@@ -165,6 +174,10 @@ struct InputsOutputs {
     ReportCUDAErrors(cudaFree(input_val_mem_gpu_));
     ReportCUDAErrors(cudaFreeHost(op_policy_mem_));
     ReportCUDAErrors(cudaFree(op_policy_mem_gpu_));
+    if (op_gate_mem_ != nullptr) {
+      ReportCUDAErrors(cudaFreeHost(op_gate_mem_));
+      ReportCUDAErrors(cudaFree(op_gate_mem_gpu_));
+    }
     ReportCUDAErrors(cudaFreeHost(op_value_mem_));
     ReportCUDAErrors(cudaFree(op_value_mem_gpu_));
     ReportCUDAErrors(cudaEventDestroy(upload_done_event_));
@@ -198,6 +211,7 @@ struct InputsOutputs {
   uint64_t* input_masks_mem_;
   DataType* input_val_mem_;
   DataType* op_policy_mem_;
+  DataType* op_gate_mem_ = nullptr;
   DataType* op_value_mem_;
   DataType* op_moves_left_mem_ = nullptr;
 
@@ -205,6 +219,7 @@ struct InputsOutputs {
   uint64_t* input_masks_mem_gpu_;
   DataType* input_val_mem_gpu_;
   DataType* op_policy_mem_gpu_;
+  DataType* op_gate_mem_gpu_ = nullptr;
   DataType* op_value_mem_gpu_;
   DataType* op_moves_left_mem_gpu_ = nullptr;
 

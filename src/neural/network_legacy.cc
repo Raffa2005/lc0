@@ -186,7 +186,16 @@ MultiHeadWeights::PolicyHead::PolicyHead(
       ip2_pol_b(LayerAdapter(policyhead.ip2_pol_b()).as_vector()),
       ip3_pol_w(LayerAdapter(policyhead.ip3_pol_w()).as_vector()),
       ip3_pol_b(LayerAdapter(policyhead.ip3_pol_b()).as_vector()),
-      ip4_pol_w(LayerAdapter(policyhead.ip4_pol_w()).as_vector()) {
+      ip4_pol_w(LayerAdapter(policyhead.ip4_pol_w()).as_vector()),
+      ip2_pol_ab_w(LayerAdapter(policyhead.ip2_pol_ab_w()).as_vector()),
+      ip2_pol_ab_b(LayerAdapter(policyhead.ip2_pol_ab_b()).as_vector()),
+      ip3_pol_ab_w(LayerAdapter(policyhead.ip3_pol_ab_w()).as_vector()),
+      ip3_pol_ab_b(LayerAdapter(policyhead.ip3_pol_ab_b()).as_vector()),
+      ip4_pol_ab_w(LayerAdapter(policyhead.ip4_pol_ab_w()).as_vector()),
+      ip_pol_gate_w(LayerAdapter(policyhead.ip_pol_gate_w()).as_vector()),
+      ip_pol_gate_b(LayerAdapter(policyhead.ip_pol_gate_b()).as_vector()),
+      ip2_pol_gate_w(LayerAdapter(policyhead.ip2_pol_gate_w()).as_vector()),
+      ip2_pol_gate_b(LayerAdapter(policyhead.ip2_pol_gate_b()).as_vector()) {
   pol_encoder_head_count = policyhead.pol_headcount();
   for (const auto& enc : policyhead.pol_encoder()) {
     pol_encoder.emplace_back(enc);

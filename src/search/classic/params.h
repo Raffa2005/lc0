@@ -158,6 +158,7 @@ class BaseSearchParams {
     return kMaxCollisionVisitsScalingPower;
   }
   bool GetSearchSpinBackoff() const { return kSearchSpinBackoff; }
+  bool GetDisableAbilityEdges() const { return kDisableAbilityEdges; }
 
   float GetGarbageCollectionDelay() const {
     return kGarbageCollectionDelay;
@@ -230,6 +231,7 @@ class BaseSearchParams {
   static const OptionId kUCIOpponentId;
   static const OptionId kUCIRatingAdvId;
   static const OptionId kSearchSpinBackoffId;
+  static const OptionId kDisableAbilityEdgesId;
   static const OptionId kGarbageCollectionDelayId;
 
  protected:
@@ -289,6 +291,7 @@ class BaseSearchParams {
   const int kMaxCollisionVisitsScalingEnd;
   const float kMaxCollisionVisitsScalingPower;
   const bool kSearchSpinBackoff;
+  const bool kDisableAbilityEdges;
   const float kGarbageCollectionDelay;
 };
 

@@ -482,7 +482,9 @@ void BlasComputation<use_eigen>::ComputeBlocking() {
   const auto num_policy_input_planes = policy_head.policy.biases.size();
   const auto num_moves_input_planes =
       attn_body_ ? weights_.ip_mov_b.size() : weights_.moves_left.biases.size();
-  const auto num_output_policy = static_cast<size_t>(kPolicyOutputs);
+  const bool doubled_policy = !policy_head.ip2_pol_ab_w.empty();
+  const auto num_output_policy =
+      static_cast<size_t>(doubled_policy ? 3716 : kPolicyOutputs);
   const auto output_channels =
       attn_body_ ? weights_.ip_emb_b.size() : weights_.input.biases.size();
   const auto num_res_blocks = weights_.residual.size();
@@ -837,77 +839,141 @@ void BlasComputation<use_eigen>::ComputeBlocking() {
             attn_body_ ? ffn_activation_ : ACTIVATION_SELU, 1.0f, 1e-6);
       }
 
-      // Q
-      FullyConnectedLayer<use_eigen>::Forward1D(
-          batch_size * kSquares, policy_embedding_size, policy_d_model,
-          buffer2.data(), policy_head.ip2_pol_w.data(),
-          policy_head.ip2_pol_b.data(), ACTIVATION_NONE, buffer1.data());
-      // K
-      FullyConnectedLayer<use_eigen>::Forward1D(
-          batch_size * kSquares, policy_embedding_size, policy_d_model,
-          buffer2.data(), policy_head.ip3_pol_w.data(),
-          policy_head.ip3_pol_b.data(), ACTIVATION_NONE, buffer3.data());
-      const float scaling = 1.0f / sqrtf(policy_d_model);
-      for (auto batch = size_t{0}; batch < batch_size; batch++) {
-        const float* A = &buffer1[batch * 64 * policy_d_model];
-        const float* B = &buffer3[batch * 64 * policy_d_model];
-        float* C = &head_buffer[batch * (64 * 64 + 8 * 24)];
-        if (use_eigen) {
-          auto C_mat = EigenMatrixMap<float>(C, kSquares, kSquares);
-          C_mat.noalias() =
-              scaling *
-              ConstEigenMatrixMap<float>(B, policy_d_model, kSquares)
-                  .transpose() *
-              ConstEigenMatrixMap<float>(A, policy_d_model, kSquares);
-        } else {
+      auto compute_attention_logits =
+          [&](const std::vector<float>& q_w, const std::vector<float>& q_b,
+              const std::vector<float>& k_w, const std::vector<float>& k_b,
+              const std::vector<float>& promo_w) {
+            std::vector<std::vector<float>> logits_per_batch(
+                batch_size, std::vector<float>(1858));
+            FullyConnectedLayer<use_eigen>::Forward1D(
+                batch_size * kSquares, policy_embedding_size, policy_d_model,
+                buffer2.data(), q_w.data(), q_b.data(), ACTIVATION_NONE,
+                buffer1.data());
+            FullyConnectedLayer<use_eigen>::Forward1D(
+                batch_size * kSquares, policy_embedding_size, policy_d_model,
+                buffer2.data(), k_w.data(), k_b.data(), ACTIVATION_NONE,
+                buffer3.data());
+            const float scaling = 1.0f / sqrtf(policy_d_model);
+            for (auto batch = size_t{0}; batch < batch_size; batch++) {
+              const float* A = &buffer1[batch * 64 * policy_d_model];
+              const float* B = &buffer3[batch * 64 * policy_d_model];
+              float* C = &head_buffer[batch * (64 * 64 + 8 * 24)];
+              if (use_eigen) {
+                auto C_mat = EigenMatrixMap<float>(C, kSquares, kSquares);
+                C_mat.noalias() =
+                    scaling *
+                    ConstEigenMatrixMap<float>(B, policy_d_model, kSquares)
+                        .transpose() *
+                    ConstEigenMatrixMap<float>(A, policy_d_model, kSquares);
+              } else {
 #ifdef USE_BLAS
-          cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, kSquares,
-                      kSquares, policy_d_model, scaling, A, policy_d_model, B,
-                      policy_d_model, 0.0f, C, 64);
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, kSquares,
+                            kSquares, policy_d_model, scaling, A,
+                            policy_d_model, B, policy_d_model, 0.0f, C, 64);
 #else
-          // Should never get here.
-          throw Exception("Blas backend internal error");
+                throw Exception("Blas backend internal error");
 #endif
-        }
-      }
-      // Promotion offset calculation.
-      for (auto batch = size_t{0}; batch < batch_size; batch++) {
-        float promotion_offsets[4][8];
-        // This is so small that SGEMM seems slower.
-        for (int i = 0; i < 4; i++) {
-          for (int j = 0; j < 8; j++) {
-            float sum = 0;
-            for (size_t k = 0; k < policy_d_model; k++) {
-              sum += buffer3[batch * kSquares * policy_d_model +
-                             (56 + j) * policy_d_model + k] *
-                     policy_head.ip4_pol_w[i * policy_d_model + k];
+              }
             }
-            promotion_offsets[i][j] = sum;
-          }
-        }
-        for (int i = 0; i < 3; i++) {
-          for (int j = 0; j < 8; j++) {
-            promotion_offsets[i][j] += promotion_offsets[3][j];
-          }
-        }
-        for (int k = 0; k < 8; k++) {      // y in cuda
-          for (int j = 0; j < 8; j++) {    // w in cuda
-            for (int i = 0; i < 3; i++) {  // c in cuda
-              head_buffer[batch * (64 * 64 + 8 * 24) + 64 * 64 + 24 * k +
-                          3 * j + i] = head_buffer[batch * (64 * 64 + 8 * 24) +
-                                                   (48 + k) * 64 + 56 + j] +
-                                       promotion_offsets[i][j];
+            for (auto batch = size_t{0}; batch < batch_size; batch++) {
+              float promotion_offsets[4][8];
+              for (int i = 0; i < 4; i++) {
+                for (int j = 0; j < 8; j++) {
+                  float sum = 0;
+                  for (size_t k = 0; k < policy_d_model; k++) {
+                    sum += buffer3[batch * kSquares * policy_d_model +
+                                   (56 + j) * policy_d_model + k] *
+                           promo_w[i * policy_d_model + k];
+                  }
+                  promotion_offsets[i][j] = sum;
+                }
+              }
+              for (int i = 0; i < 3; i++) {
+                for (int j = 0; j < 8; j++) {
+                  promotion_offsets[i][j] += promotion_offsets[3][j];
+                }
+              }
+              for (int k = 0; k < 8; k++) {
+                for (int j = 0; j < 8; j++) {
+                  for (int i = 0; i < 3; i++) {
+                    head_buffer[batch * (64 * 64 + 8 * 24) + 64 * 64 + 24 * k +
+                                3 * j + i] =
+                        head_buffer[batch * (64 * 64 + 8 * 24) +
+                                    (48 + k) * 64 + 56 + j] +
+                        promotion_offsets[i][j];
+                  }
+                }
+              }
+              for (auto i = 0; i < 64 * 64 + 8 * 24; i++) {
+                auto j = kAttnPolicyMap[i];
+                if (j >= 0) {
+                  logits_per_batch[batch][j] =
+                      head_buffer[batch * (64 * 64 + 8 * 24) + i];
+                }
+              }
+            }
+            return logits_per_batch;
+          };
+
+      auto normal_logits = compute_attention_logits(
+          policy_head.ip2_pol_w, policy_head.ip2_pol_b, policy_head.ip3_pol_w,
+          policy_head.ip3_pol_b, policy_head.ip4_pol_w);
+      std::vector<std::vector<float>> ability_logits;
+      if (doubled_policy) {
+        ability_logits = compute_attention_logits(
+            policy_head.ip2_pol_ab_w, policy_head.ip2_pol_ab_b,
+            policy_head.ip3_pol_ab_w, policy_head.ip3_pol_ab_b,
+            policy_head.ip4_pol_ab_w);
+      }
+
+      for (auto batch = size_t{0}; batch < batch_size; batch++) {
+        std::vector<float> policy(num_output_policy, -1e9f);
+        if (!policy_head.ip_pol_gate_w.empty() &&
+            !policy_head.ip2_pol_gate_w.empty()) {
+          std::vector<float> gate_hidden(policy_head.ip_pol_gate_b.size(), 0.0f);
+          for (size_t sq = 0; sq < kSquares; ++sq) {
+            const float* token =
+                &buffer2[batch * kSquares * policy_embedding_size +
+                         sq * policy_embedding_size];
+            for (size_t h = 0; h < gate_hidden.size(); ++h) {
+              float sum = policy_head.ip_pol_gate_b[h];
+              for (size_t c = 0; c < policy_embedding_size; ++c) {
+                sum += token[c] *
+                       policy_head.ip_pol_gate_w[h * policy_embedding_size + c];
+              }
+              gate_hidden[h] += sum;
             }
           }
-        }
-      }
-      // Mapping from attention policy to lc0 policy
-      for (auto batch = size_t{0}; batch < batch_size; batch++) {
-        std::vector<float> policy(num_output_policy);
-        for (auto i = 0; i < 64 * 64 + 8 * 24; i++) {
-          auto j = kAttnPolicyMap[i];
-          if (j >= 0) {
-            policy[j] = head_buffer[batch * (64 * 64 + 8 * 24) + i];
+          for (float& val : gate_hidden) {
+            val /= static_cast<float>(kSquares);
+            val = 0.5f * val *
+                  (1.0f + std::tanh(0.7978845608f *
+                                    (val + 0.044715f * val * val * val)));
+          }
+          float gate_logit =
+              policy_head.ip2_pol_gate_b.empty() ? 0.0f
+                                                 : policy_head.ip2_pol_gate_b[0];
+          for (size_t h = 0; h < gate_hidden.size(); ++h) {
+            gate_logit += gate_hidden[h] * policy_head.ip2_pol_gate_w[h];
+          }
+          const float p_burn = 1.0f / (1.0f + std::exp(-gate_logit));
+
+          std::vector<float> normal_probs(1858);
+          std::vector<float> ability_probs(1858);
+          SoftmaxActivation(1858, normal_logits[batch].data(),
+                            normal_probs.data());
+          SoftmaxActivation(1858, ability_logits[batch].data(),
+                            ability_probs.data());
+          for (int j = 0; j < 1858; ++j) {
+            policy[j] =
+                std::log(std::max((1.0f - p_burn) * normal_probs[j], 1e-30f));
+            policy[1858 + j] =
+                std::log(std::max(p_burn * ability_probs[j], 1e-30f));
+          }
+        } else {
+          for (int j = 0; j < 1858; ++j) {
+            policy[j] = normal_logits[batch][j];
+            if (doubled_policy) policy[1858 + j] = ability_logits[batch][j];
           }
         }
         policies_.emplace_back(std::move(policy));
@@ -930,7 +996,7 @@ void BlasComputation<use_eigen>::ComputeBlocking() {
 
       // Mapping from convolutional policy to lc0 policy
       for (auto batch = size_t{0}; batch < batch_size; batch++) {
-        std::vector<float> policy(num_output_policy);
+        std::vector<float> policy(num_output_policy, -1e9f);
         for (auto i = 0; i < kPolicyUsedPlanes * kSquares; i++) {
           auto j = kConvPolicyMap[i];
           if (j >= 0) {
@@ -958,7 +1024,7 @@ void BlasComputation<use_eigen>::ComputeBlocking() {
           buffer3.data());
 
       for (size_t j = 0; j < batch_size; j++) {
-        std::vector<float> policy(num_output_policy);
+        std::vector<float> policy(num_output_policy, -1e9f);
 
         // Get the moves
         policy.assign(buffer3.begin() + j * num_output_policy,

@@ -2039,7 +2039,8 @@ void SearchWorker::ExtendNode(Node* node, int depth,
 
   // Double-move variant: if ability is available and we're not already in a
   // mid-double-move, add ability-activation edges for each legal move.
-  if (pos.OurDoublemoveAvailable() && !pos.IsMidDoublemove()) {
+  if (!params_.GetDisableAbilityEdges() && pos.OurDoublemoveAvailable() &&
+      !pos.IsMidDoublemove()) {
     const size_t n = legal_moves.size();
     legal_moves.reserve(2 * n);
     for (size_t i = 0; i < n; i++) {

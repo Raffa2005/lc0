@@ -200,6 +200,15 @@ struct MultiHeadWeights : public BaseWeights {
     Vec ip3_pol_w;
     Vec ip3_pol_b;
     Vec ip4_pol_w;
+    Vec ip2_pol_ab_w;
+    Vec ip2_pol_ab_b;
+    Vec ip3_pol_ab_w;
+    Vec ip3_pol_ab_b;
+    Vec ip4_pol_ab_w;
+    Vec ip_pol_gate_w;
+    Vec ip_pol_gate_b;
+    Vec ip2_pol_gate_w;
+    Vec ip2_pol_gate_b;
     int pol_encoder_head_count;
     std::vector<EncoderLayer> pol_encoder;
   };

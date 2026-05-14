@@ -614,6 +614,36 @@ __global__ void globalAvgPool_kernel_NHWC_fp16(half* output, const half* input,
   if (opIndex < outputSize) output[opIndex] = (half)avg;
 }
 
+template <typename T>
+__global__ void globalAvgPool_kernel_NHWC(T* output, const T* input,
+                                          const T* prevLayerBias,
+                                          int outputSize, int C) {
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int laneId = threadIdx.x & 0x1F;
+  const int opIndex = tid >> 5;
+  if (opIndex >= outputSize) return;
+
+  const int n = opIndex / C;
+  const int c = opIndex % C;
+
+  float S = 0.0f;
+#pragma unroll
+  for (int sq = laneId; sq < 64; sq += 32) {
+    S += (float)(input[(n * 64 + sq) * C + c]);
+  }
+
+#pragma unroll
+  for (int offset = 1; offset < 32; offset *= 2) {
+    S += __shfl_down_sync(0xFFFFFFFF, S, offset);
+  }
+
+  if (laneId == 0) {
+    float avg = S / 64.0f;
+    if (prevLayerBias) avg += (float)prevLayerBias[c];
+    output[opIndex] = (T)avg;
+  }
+}
+
 // Each thread reads 2 inputs (8x8/32), and each warp writes a single output.
 template <typename T>
 __global__ void globalAvgPool_kernel(T* output, const T* input,
@@ -659,11 +689,19 @@ void globalAvgPool(int N, int C, T* output, const T* input,
                    const T* prevLayerBias, bool nhwc, cudaStream_t stream) {
   const int kPlaneSize = 64;
   if (nhwc) {
-    assert((std::is_same<half, T>::value));
-    // For NHWC fp16, simply launch N blocks, each with C threads.
-    globalAvgPool_kernel_NHWC_fp16<<<N, C, 0, stream>>>(
-        (half*)output, (half*)input, (half*)prevLayerBias, N * C * kPlaneSize,
-        N * C);
+    if (std::is_same<half, T>::value) {
+      // For NHWC fp16, simply launch N blocks, each with C threads.
+      globalAvgPool_kernel_NHWC_fp16<<<N, C, 0, stream>>>(
+          (half*)output, (half*)input, (half*)prevLayerBias,
+          N * C * kPlaneSize, N * C);
+    } else {
+      const int kTotalWarps = N * C;
+      const int kWarpsPerBlock = 8;
+      const int kBlockSize = kWarpsPerBlock * 32;
+      const int blocks = DivUp(kTotalWarps, kWarpsPerBlock);
+      globalAvgPool_kernel_NHWC<<<blocks, kBlockSize, 0, stream>>>(
+          output, input, prevLayerBias, N * C, C);
+    }
   } else {
     // For NCHW layout (used with fp32),
     // each warp processes a full plane (64 elements), and writes a single

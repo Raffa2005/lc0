@@ -113,6 +113,7 @@ class SelfPlayTournament {
   const std::string kTournamentResultsFile;
   const float kDiscardedStartChance;
   const std::string kAbilityMode;
+  const float kAsymmetricRate;
 };
 
 }  // namespace lczero

@@ -26,10 +26,12 @@
 */
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <list>
 #include <memory>
 #include <mutex>
 #include <type_traits>
+#include <vector>
 
 #include "cuda_common.h"
 #include "inputs_outputs.h"
@@ -532,6 +534,13 @@ class CudaNetwork : public Network {
     // Policy head.
     {
       MultiHeadWeights::PolicyHead& head = weights.policy_heads.at(policy_head);
+      doubled_policy_ = !head.ip2_pol_ab_w.empty();
+      gate_hidden_size_ = static_cast<int>(head.ip_pol_gate_b.size());
+      if (gate_hidden_size_ > 0) {
+        gate_dense1_w_ = head.ip2_pol_gate_w;
+        gate_dense1_b_ =
+            head.ip2_pol_gate_b.empty() ? 0.0f : head.ip2_pol_gate_b[0];
+      }
       if (attn_policy_) {
         auto AttentionPolicy = std::make_unique<AttentionPolicyHead<DataType>>(
             getLastLayer(), head, scratch_mem_, attn_body_, act,
@@ -539,9 +548,38 @@ class CudaNetwork : public Network {
         network_.emplace_back(std::move(AttentionPolicy));
 
         auto policymap = std::make_unique<PolicyMapLayer<DataType>>(
-            getLastLayer(), kNumOutputPolicy, 1, 1, 64 * 64 + 8 * 24, true);
+            getLastLayer(), 1858, 1, 1, 64 * 64 + 8 * 24, true);
         policymap->LoadWeights(kAttnPolicyMap, scratch_mem_);
         network_.emplace_back(std::move(policymap));
+
+        if (doubled_policy_) {
+          auto ability_head = head;
+          ability_head.ip2_pol_w = head.ip2_pol_ab_w;
+          ability_head.ip2_pol_b = head.ip2_pol_ab_b;
+          ability_head.ip3_pol_w = head.ip3_pol_ab_w;
+          ability_head.ip3_pol_b = head.ip3_pol_ab_b;
+          ability_head.ip4_pol_w = head.ip4_pol_ab_w;
+
+          auto AbilityPolicy =
+              std::make_unique<AttentionPolicyHead<DataType>>(
+                  // The ability head is parallel to the normal policy head and
+                  // must read the encoder tensor, not the normal policy-map
+                  // layer that was appended just above.
+                  encoder_last_, ability_head, scratch_mem_, attn_body_, act,
+                  max_batch_size_, use_gemm_ex);
+          network_.emplace_back(std::move(AbilityPolicy));
+
+          auto abilitymap = std::make_unique<PolicyMapLayer<DataType>>(
+              getLastLayer(), 1858, 1, 1, 64 * 64 + 8 * 24, true);
+          abilitymap->LoadWeights(kAttnPolicyMap, scratch_mem_);
+          network_.emplace_back(std::move(abilitymap));
+        }
+
+        if (gate_hidden_size_ > 0) {
+          gate_embed_layer_ = std::make_unique<EmbeddingLayer<DataType>>(
+              encoder_last_, head.ip_pol_gate_w, head.ip_pol_gate_b,
+              scratch_mem_, ACTIVATION_NONE);
+        }
 
       } else {
         if (conv_policy_) {
@@ -906,9 +944,25 @@ class CudaNetwork : public Network {
           head_offset_pointers);  // Entire Attention policy head except for the
                                   // policy map
       network_[l++]->Eval(
-          batchSize, (DataType*)opPol, spare1, nullptr, scratch_mem,
+          batchSize, opPol, spare1, nullptr, scratch_mem,
           scratch_size_, nullptr, cublas,
-          compute_stream);  // policy map layer  // POLICY output
+          compute_stream);  // normal policy map
+      if (doubled_policy_) {
+        network_[l++]->Eval(batchSize, spare1, flow, spare2, scratch_mem,
+                            scratch_size_, nullptr, cublas, compute_stream,
+                            head_offset_pointers);  // ability policy head
+        network_[l++]->Eval(batchSize, opPol + 1858, spare1, nullptr,
+                            scratch_mem, scratch_size_, nullptr, cublas,
+                            compute_stream);  // ability policy map
+      }
+      if (gate_embed_layer_) {
+        gate_embed_layer_->Eval(batchSize, spare1, flow, nullptr, scratch_mem,
+                                scratch_size_, nullptr, cublas,
+                                compute_stream);
+        globalAvgPool(batchSize, gate_hidden_size_, io->op_gate_mem_gpu_,
+                      spare1, static_cast<const DataType*>(nullptr), true,
+                      compute_stream);
+      }
 
     } else if (conv_policy_) {
       network_[l++]->Eval(batchSize, spare1, flow, nullptr, scratch_mem,
@@ -941,6 +995,12 @@ class CudaNetwork : public Network {
         io->op_policy_mem_, io->op_policy_mem_gpu_,
         sizeof(io->op_policy_mem_[0]) * kNumOutputPolicy * batchSize,
         cudaMemcpyDeviceToHost, download_stream));
+    if (gate_hidden_size_ > 0) {
+      ReportCUDAErrors(cudaMemcpyAsync(
+          io->op_gate_mem_, io->op_gate_mem_gpu_,
+          sizeof(io->op_gate_mem_[0]) * gate_hidden_size_ * batchSize,
+          cudaMemcpyDeviceToHost, download_stream));
+    }
 
     // value head
     network_[l++]->Eval(batchSize, (DataType*)opVal, flow, spare2, scratch_mem,
@@ -1039,6 +1099,65 @@ class CudaNetwork : public Network {
         wdl[2 * i + 1] = d;
       }
     }
+
+    if (gate_hidden_size_ > 0) {
+      constexpr float kSqrtTwoOverPi = 0.7978845608f;
+      std::vector<float> normal_logits(1858);
+      std::vector<float> ability_logits(1858);
+      std::vector<float> normal_probs(1858);
+      std::vector<float> ability_probs(1858);
+      for (int i = 0; i < batchSize; i++) {
+        const auto* gate_hidden = io->op_gate_mem_ + i * gate_hidden_size_;
+        float gate_logit = gate_dense1_b_;
+        for (int j = 0; j < gate_hidden_size_; ++j) {
+          const float x = FromType(gate_hidden[j]);
+          const float gelu =
+              0.5f * x *
+              (1.0f + std::tanh(kSqrtTwoOverPi *
+                                (x + 0.044715f * x * x * x)));
+          gate_logit += gate_dense1_w_[j] * gelu;
+        }
+        const float p_burn = 1.0f / (1.0f + std::exp(-gate_logit));
+
+        auto* policy = io->op_policy_mem_ + i * kNumOutputPolicy;
+        for (int j = 0; j < 1858; ++j) {
+          normal_logits[j] = FromType(policy[j]);
+          ability_logits[j] = FromType(policy[1858 + j]);
+        }
+
+        const float normal_max =
+            *std::max_element(normal_logits.begin(), normal_logits.end());
+        const float ability_max =
+            *std::max_element(ability_logits.begin(), ability_logits.end());
+        float normal_sum = 0.0f;
+        float ability_sum = 0.0f;
+        for (int j = 0; j < 1858; ++j) {
+          normal_probs[j] = std::exp(normal_logits[j] - normal_max);
+          ability_probs[j] = std::exp(ability_logits[j] - ability_max);
+          normal_sum += normal_probs[j];
+          ability_sum += ability_probs[j];
+        }
+
+        const float safe_normal = normal_sum > 0.0f ? normal_sum : 1.0f;
+        const float safe_ability = ability_sum > 0.0f ? ability_sum : 1.0f;
+        for (int j = 0; j < 1858; ++j) {
+          const float normal_prob =
+              (1.0f - p_burn) * (normal_probs[j] / safe_normal);
+          const float ability_prob =
+              p_burn * (ability_probs[j] / safe_ability);
+          ToType(policy[j], std::log(std::max(normal_prob, 1e-30f)));
+          ToType(policy[1858 + j],
+                 std::log(std::max(ability_prob, 1e-30f)));
+        }
+      }
+    } else if (!doubled_policy_) {
+      for (int i = 0; i < batchSize; i++) {
+        auto* policy = io->op_policy_mem_ + i * kNumOutputPolicy;
+        for (int j = 1858; j < kNumOutputPolicy; ++j) {
+          ToType(policy[j], -1e9f);
+        }
+      }
+    }
 #if CUDA_GRAPH_SUPPORTS_EXTERNAL_EVENTS
     ReportCUDAErrors(cudaEventSynchronize(io->download_done_event_));
 #endif
@@ -1094,7 +1213,8 @@ class CudaNetwork : public Network {
     std::lock_guard<std::mutex> lock(inputs_outputs_lock_);
     if (free_inputs_outputs_.empty()) {
       return std::make_unique<InputsOutputs<DataType>>(
-          max_batch_size_, wdl_, moves_left_, tensor_mem_size_, scratch_size_,
+          max_batch_size_, wdl_, moves_left_, gate_hidden_size_,
+          tensor_mem_size_, scratch_size_,
           !has_tensor_cores_ && std::is_same<half, DataType>::value);
     } else {
       std::unique_ptr<InputsOutputs<DataType>> resource =
@@ -1113,7 +1233,7 @@ class CudaNetwork : public Network {
   // This function invokes constructor just to please complier and silence
   // warning. Is never called (but compiler thinks that it could).
   void UglyFunctionToSilenceNvccWarning() {
-    InputsOutputs<DataType> io(0, false, false, false);
+    InputsOutputs<DataType> io(0, false, false, 0, 0, 0, false);
   }
 
  private:
@@ -1142,6 +1262,11 @@ class CudaNetwork : public Network {
   bool conv_policy_;
   bool attn_policy_;
   bool attn_body_;
+  bool doubled_policy_ = false;
+  int gate_hidden_size_ = 0;
+  std::vector<float> gate_dense1_w_;
+  float gate_dense1_b_ = 0.0f;
+  std::unique_ptr<EmbeddingLayer<DataType>> gate_embed_layer_;
   int num_encoder_blocks_;
   std::vector<std::unique_ptr<BaseLayer<DataType>>> network_;
   BaseLayer<DataType>* getLastLayer() { return network_.back().get(); }
