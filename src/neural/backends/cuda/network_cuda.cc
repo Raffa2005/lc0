@@ -548,7 +548,7 @@ class CudaNetwork : public Network {
         network_.emplace_back(std::move(AttentionPolicy));
 
         auto policymap = std::make_unique<PolicyMapLayer<DataType>>(
-            getLastLayer(), 1858, 1, 1, 64 * 64 + 8 * 24, true);
+            getLastLayer(), kNumOutputPolicy, 1, 1, 64 * 64 + 8 * 24, true);
         policymap->LoadWeights(kAttnPolicyMap, scratch_mem_);
         network_.emplace_back(std::move(policymap));
 
@@ -570,7 +570,7 @@ class CudaNetwork : public Network {
           network_.emplace_back(std::move(AbilityPolicy));
 
           auto abilitymap = std::make_unique<PolicyMapLayer<DataType>>(
-              getLastLayer(), 1858, 1, 1, 64 * 64 + 8 * 24, true);
+              getLastLayer(), kNumOutputPolicy, 1, 1, 64 * 64 + 8 * 24, true);
           abilitymap->LoadWeights(kAttnPolicyMap, scratch_mem_);
           network_.emplace_back(std::move(abilitymap));
         }
