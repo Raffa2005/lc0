@@ -82,7 +82,11 @@ GameState MakeGameState(const std::string& fen,
     Move m = cur_board.ParseMove(move);
     state.moves.push_back(m);
     cur_board.ApplyMove(m);
-    cur_board.Mirror();
+    // Double-move variant: an ability-activated move is half-1 of a
+    // double-move; the same side plays half-2 next, so don't swap perspective.
+    if (!m.is_ability_activation()) {
+      cur_board.Mirror();
+    }
   }
   return state;
 }

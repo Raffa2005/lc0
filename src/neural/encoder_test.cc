@@ -20,6 +20,8 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+
 namespace lczero {
 
 auto kAllSquaresMask = std::numeric_limits<std::uint64_t>::max();
@@ -529,6 +531,42 @@ TEST(EncodePositionForNN, EncodeEarlyGameFlipFormat3) {
   their_king_plane = encoded_planes[11];
   EXPECT_EQ(their_king_plane.mask, 1ull << 43);
   EXPECT_EQ(their_king_plane.value, 1.0f);
+}
+
+TEST(EncodePositionForNN, RepeatCurrentIgnoresRealHistory) {
+  ChessBoard board;
+  PositionHistory history;
+  board.SetFromFen(ChessBoard::kStartposFen);
+  history.Reset(board, 0, 1);
+  history.Append(history.Last().GetBoard().ParseMove("e2e4"));
+  history.Append(history.Last().GetBoard().ParseMove("e7e5"));
+  history.Append(history.Last().GetBoard().ParseMove("g1f3"));
+
+  InputPlanes repeated =
+      EncodePositionForNN(pblczero::NetworkFormat::INPUT_CLASSICAL_112_PLANE,
+                          history, 8, FillEmptyHistory::REPEAT_CURRENT,
+                          nullptr);
+
+  for (int slot = 1; slot < 8; ++slot) {
+    for (int plane = 0; plane < kPlanesPerBoard; ++plane) {
+      SCOPED_TRACE("slot=" + std::to_string(slot) +
+                   " plane=" + std::to_string(plane));
+      EXPECT_EQ(repeated[slot * kPlanesPerBoard + plane].mask,
+                repeated[plane].mask);
+      EXPECT_EQ(repeated[slot * kPlanesPerBoard + plane].value,
+                repeated[plane].value);
+    }
+  }
+
+  InputPlanes normal_history =
+      EncodePositionForNN(pblczero::NetworkFormat::INPUT_CLASSICAL_112_PLANE,
+                          history, 8, FillEmptyHistory::ALWAYS, nullptr);
+  bool slot_one_differs = false;
+  for (int plane = 0; plane < kPlanesPerBoard; ++plane) {
+    slot_one_differs |=
+        normal_history[kPlanesPerBoard + plane].mask != normal_history[plane].mask;
+  }
+  EXPECT_TRUE(slot_one_differs);
 }
 
 }  // namespace lczero

@@ -536,7 +536,11 @@ bool NodeTree::ResetToPosition(const std::string& starting_fen,
     Move m = cur_board.ParseMove(move);
     state.moves.push_back(m);
     cur_board.ApplyMove(m);
-    cur_board.Mirror();
+    // Double-move variant: skip Mirror after half-1 of an ability move so
+    // the next move can be parsed in the same perspective.
+    if (!m.is_ability_activation()) {
+      cur_board.Mirror();
+    }
   }
   return ResetToPosition(state);
 }

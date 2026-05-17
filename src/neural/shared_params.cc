@@ -67,7 +67,8 @@ const OptionId SharedBackendParams::kNNCacheSizeId{
 
 void SharedBackendParams::Populate(OptionsParser* options) {
   options->Add<FloatOption>(kPolicySoftmaxTemp, 0.1f, 10.0f) = 1.359f;
-  std::vector<std::string> history_fill_opt{"no", "fen_only", "always"};
+  std::vector<std::string> history_fill_opt{"no", "fen_only", "always",
+                                            "repeat_current"};
   options->Add<ChoiceOption>(kHistoryFill, history_fill_opt) = "fen_only";
 
 #if defined(EMBED)

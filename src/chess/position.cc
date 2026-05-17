@@ -34,6 +34,7 @@
 #include <cstring>
 
 #include "chess/types.h"
+#include "utils/exception.h"
 
 namespace lczero {
 
@@ -76,9 +77,94 @@ Position::Position(const ChessBoard& board, int rule50_ply, int game_ply)
   us_board_ = board;
 }
 
+// Parse an optional 7th FEN field that encodes double-move ability state.
+// Format: one token with characters drawn from {W, B, w, b, m, -}.
+//   'W' or 'w' -> White still has the double-move ability.
+//   'B' or 'b' -> Black still has the double-move ability.
+//   'm'        -> currently in a mid-doublemove (between the two halves).
+//   '-'        -> placeholder, ignored.
+// If the 7th field is absent we keep the Position defaults
+// (both abilities available, not mid-doublemove). Examples:
+//   "WB"     both have ability (default)
+//   "W"      only white has ability
+//   "-B"     only black has ability
+//   "Wm"    white has ability AND mid-doublemove (rare; legal positions only)
+static void ParseAbilityField(std::string_view tok, bool* white_has,
+                              bool* black_has, bool* mid_double) {
+  *white_has = false;
+  *black_has = false;
+  *mid_double = false;
+  for (char c : tok) {
+    switch (c) {
+      case 'W': case 'w': *white_has = true; break;
+      case 'B': case 'b': *black_has = true; break;
+      case 'M': case 'm': *mid_double = true; break;
+      case '-': break;
+      default:
+        throw Exception(
+            std::string("Invalid character '") + c +
+            "' in ability field; expected W/B/m/-: " + std::string(tok));
+    }
+  }
+}
+
 Position Position::FromFen(std::string_view fen) {
   Position pos;
-  pos.us_board_.SetFromFen(std::string(fen), &pos.rule50_ply_, &pos.ply_count_);
+  // Split off any 7th-or-later whitespace-delimited token; that is our
+  // double-move ability extension. Standard FEN has 6 fields; pass only
+  // those (plus any trailing whitespace) to SetFromFen, which is strict.
+  std::string_view base_fen = fen;
+  std::string_view ability_tok;
+  {
+    size_t pos_idx = 0;
+    int token_count = 0;
+    bool in_token = false;
+    size_t end_of_6 = fen.size();
+    for (; pos_idx < fen.size(); ++pos_idx) {
+      bool ws = fen[pos_idx] == ' ' || fen[pos_idx] == '\t';
+      if (!ws && !in_token) {
+        in_token = true;
+        ++token_count;
+        if (token_count == 7) {
+          // Step back so end_of_6 points to the start of the 7th token's
+          // leading whitespace, keeping a clean base_fen for SetFromFen.
+          while (end_of_6 > 0 &&
+                 (fen[end_of_6 - 1] == ' ' || fen[end_of_6 - 1] == '\t')) {
+            --end_of_6;
+          }
+          break;
+        }
+      } else if (ws && in_token) {
+        in_token = false;
+        end_of_6 = pos_idx;
+      }
+    }
+    if (token_count >= 7) {
+      base_fen = fen.substr(0, end_of_6);
+      // Find the end of the 7th token (next whitespace or end of input).
+      size_t start = pos_idx;
+      size_t stop = start;
+      while (stop < fen.size() && fen[stop] != ' ' && fen[stop] != '\t') {
+        ++stop;
+      }
+      ability_tok = fen.substr(start, stop - start);
+    }
+  }
+
+  pos.us_board_.SetFromFen(std::string(base_fen), &pos.rule50_ply_,
+                           &pos.ply_count_);
+
+  if (!ability_tok.empty()) {
+    bool white_has, black_has, mid_double;
+    ParseAbilityField(ability_tok, &white_has, &black_has, &mid_double);
+    // Translate global-color flags to perspective-relative fields. After
+    // SetFromFen the board is mirrored iff black is to move.
+    const bool black_to_move = pos.us_board_.flipped();
+    pos.our_doublemove_available_ = black_to_move ? black_has : white_has;
+    pos.their_doublemove_available_ = black_to_move ? white_has : black_has;
+    pos.is_mid_doublemove_ = mid_double;
+  }
+
   return pos;
 }
 
@@ -203,6 +289,21 @@ std::string PositionToFen(const Position& pos) {
   result += " " + std::to_string(pos.GetRule50Ply());
   result += " " + std::to_string(
                       (pos.GetGamePly() + (pos.IsBlackToMove() ? 1 : 2)) / 2);
+  // Append double-move ability state only when it differs from the default
+  // (both have ability, not mid-doublemove). This keeps standard FENs clean.
+  const bool black_to_move = pos.IsBlackToMove();
+  const bool white_has = black_to_move ? pos.TheirDoublemoveAvailable()
+                                       : pos.OurDoublemoveAvailable();
+  const bool black_has = black_to_move ? pos.OurDoublemoveAvailable()
+                                       : pos.TheirDoublemoveAvailable();
+  const bool mid = pos.IsMidDoublemove();
+  if (!white_has || !black_has || mid) {
+    std::string tok;
+    tok += white_has ? 'W' : '-';
+    tok += black_has ? 'B' : '-';
+    if (mid) tok += 'm';
+    result += " " + tok;
+  }
   return result;
 }
 }  // namespace lczero

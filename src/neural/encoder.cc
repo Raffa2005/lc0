@@ -249,32 +249,41 @@ InputPlanes EncodePositionForNN(
   int history_idx = history.size() - 1;
   for (int i = 0; i < std::min(history_planes, kMoveHistory);
        ++i, --history_idx) {
-    const Position& position = history[history_idx < 0 ? 0 : history_idx];
+    const bool repeat_current =
+        fill_empty_history == FillEmptyHistory::REPEAT_CURRENT;
+    const Position& position =
+        repeat_current ? history.back()
+                       : history[history_idx < 0 ? 0 : history_idx];
     ChessBoard board = position.GetBoard();
     if (flip) board.Mirror();
     // Castling changes can't be repeated, so we can stop early.
-    if (stop_early && board.castlings().as_int() != castlings.as_int()) break;
+    if (!repeat_current && stop_early &&
+        board.castlings().as_int() != castlings.as_int()) {
+      break;
+    }
     // Enpassants can't be repeated, but we do need to always send the current
     // position.
-    if (stop_early && history_idx != static_cast<int>(history.size()) - 1 &&
+    if (!repeat_current && stop_early &&
+        history_idx != static_cast<int>(history.size()) - 1 &&
         !board.en_passant().empty()) {
       break;
     }
     // If en-passant is possible we know the previous move.
-    if (fill_empty_history == FillEmptyHistory::NO &&
+    if (!repeat_current && fill_empty_history == FillEmptyHistory::NO &&
         (history_idx < -1 ||
          (history_idx == -1 && board.en_passant().empty()))) {
       break;
     }
     // Board may be flipped so compare with position.GetBoard().
-    if (history_idx < 0 && fill_empty_history == FillEmptyHistory::FEN_ONLY &&
+    if (!repeat_current && history_idx < 0 &&
+        fill_empty_history == FillEmptyHistory::FEN_ONLY &&
         position.GetBoard() == ChessBoard::kStartposBoard) {
       break;
     }
     const int repetitions = position.GetRepetitions();
     // Canonical v2 only writes an item if it is a repeat, unless its the most
     // recent position.
-    if (skip_non_repeats && repetitions == 0 && i > 0) {
+    if (!repeat_current && skip_non_repeats && repetitions == 0 && i > 0) {
       if (history_idx > 0 && !position.IsMidDoublemove()) flip = !flip;
       // If no capture no pawn is 0, the previous was start of game, capture or
       // pawn push, so there can't be any more repeats that are worth
@@ -317,10 +326,12 @@ InputPlanes EncodePositionForNN(
     // Double-move variant: only toggle flip when the perspective actually
     // changed.  Mid-double-move positions were constructed without Mirror(),
     // so the perspective is the same as their parent.
-    if (history_idx > 0 && !position.IsMidDoublemove()) flip = !flip;
+    if (!repeat_current && history_idx > 0 && !position.IsMidDoublemove()) {
+      flip = !flip;
+    }
     // If no capture no pawn is 0, the previous was start of game, capture or
     // pawn push, so no need to go back further if stopping early.
-    if (stop_early && position.GetRule50Ply() == 0) break;
+    if (!repeat_current && stop_early && position.GetRule50Ply() == 0) break;
   }
   if (transform != NoTransform) {
     // Transform all masks.

@@ -238,12 +238,17 @@ inline PieceType PieceType::Parse(char c) {
 }
 
 inline std::string Move::ToString(bool is_chess960) const {
+  std::string s;
   if (is_castling() && !is_chess960) {
-    return from().ToString() + (to().file() > from().file() ? "g" : "c") +
-           to().rank().ToString();
+    s = from().ToString() + (to().file() > from().file() ? "g" : "c") +
+        to().rank().ToString();
+  } else {
+    s = from().ToString() + to().ToString() +
+        (is_promotion() ? promotion().ToString(false) : "");
   }
-  return from().ToString() + to().ToString() +
-         (is_promotion() ? promotion().ToString(false) : "");
+  // Double-move variant: trailing '+' marks half-1 of an ability move.
+  if (is_ability_activation()) s += '+';
+  return s;
 }
 
 using MoveList = std::vector<Move>;

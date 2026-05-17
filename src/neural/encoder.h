@@ -39,7 +39,7 @@ constexpr int kMoveHistory = 8;
 constexpr int kPlanesPerBoard = 13;
 constexpr int kAuxPlaneBase = kPlanesPerBoard * kMoveHistory;
 
-enum class FillEmptyHistory { NO, FEN_ONLY, ALWAYS };
+enum class FillEmptyHistory { NO, FEN_ONLY, ALWAYS, REPEAT_CURRENT };
 
 // Returns the transform that would be used in EncodePositionForNN.
 int TransformForPosition(pblczero::NetworkFormat::InputFormat input_format,

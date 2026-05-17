@@ -1152,6 +1152,14 @@ Move ChessBoard::ParseMove(std::string_view move_str) const {
     throw Exception("Invalid move (" + std::string(reason) +
                     "): " + std::string(move_str));
   };
+  // Double-move variant: an optional trailing '+' marks half-1 of an
+  // ability-activated double-move. Strip it before parsing the squares;
+  // reattach to the returned Move at the end.
+  bool ability_activation = false;
+  if (!move_str.empty() && move_str.back() == '+') {
+    ability_activation = true;
+    move_str.remove_suffix(1);
+  }
   if (move_str.size() < 4 || move_str.size() > 5) complain("wrong move size");
   File from_file = File::Parse(move_str[0]);
   Rank from_rank = Rank::Parse(move_str[1]);
@@ -1169,6 +1177,7 @@ Move ChessBoard::ParseMove(std::string_view move_str) const {
   Square to(to_file, to_rank);
   if (!our_pieces_.get(from)) complain("no piece to move");
 
+  Move parsed;
   // Pawns at back ranks are used to encode en-passant, that's why we need to
   // check that a piece doesn't go from there.
   if (pawns_.get(from) && (from_rank != kRank1 && from_rank != kRank8) &&
@@ -1177,25 +1186,25 @@ Move ChessBoard::ParseMove(std::string_view move_str) const {
     PieceType promotion =
         move_str.size() > 4 ? PieceType::Parse(move_str[4]) : kKnight;
     if (!promotion.CanPromoteInto()) complain("invalid promotion");
-    return Move::WhitePromotion(from, to, promotion);
-  }
-  if (from == our_king_ && our_pieces_.get(to)) {
+    parsed = Move::WhitePromotion(from, to, promotion);
+  } else if (from == our_king_ && our_pieces_.get(to)) {
     // FRC-style castling.
-    return Move::WhiteCastling(from.file(), to.file());
-  }
-  if (from == our_king_ && from == kSquareE1 && to == kSquareG1) {
+    parsed = Move::WhiteCastling(from.file(), to.file());
+  } else if (from == our_king_ && from == kSquareE1 && to == kSquareG1) {
     // Kingside castling.
-    return Move::WhiteCastling(from.file(), kFileH);
-  }
-  if (from == our_king_ && from == kSquareE1 && to == kSquareC1) {
-    // Qeenside castling.
-    return Move::WhiteCastling(from.file(), kFileA);
-  }
-  if (from.file() != to.file() && pawns().get(from) && !their_pieces_.get(to)) {
+    parsed = Move::WhiteCastling(from.file(), kFileH);
+  } else if (from == our_king_ && from == kSquareE1 && to == kSquareC1) {
+    // Queenside castling.
+    parsed = Move::WhiteCastling(from.file(), kFileA);
+  } else if (from.file() != to.file() && pawns().get(from) &&
+             !their_pieces_.get(to)) {
     // En passant.
-    return Move::WhiteEnPassant(from, to);
+    parsed = Move::WhiteEnPassant(from, to);
+  } else {
+    parsed = Move::White(from, to);
   }
-  return Move::White(from, to);
+  if (ability_activation) parsed = parsed.WithAbilityActivation();
+  return parsed;
 }
 
 namespace {
