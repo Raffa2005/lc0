@@ -66,6 +66,12 @@ const OptionId kOpeningStopProbId{
     "opening-stop-prob", "OpeningStopProb",
     "From each opening move, start a self-play game with probability max(p, "
     "1/n), where p is the value given and n the opening moves remaining."};
+const OptionId kNoSoftAdjudicateId{
+    "no-soft-adjudicate", "NoSoftAdjudicate",
+    "Disable the soft-adjudication that triggers when both players' "
+    "double-move abilities are exhausted. Games then play out to natural "
+    "termination (checkmate, stalemate, threefold, 50-move rule, or the 450-"
+    "ply cap)."};
 }  // namespace
 
 void SelfPlayGame::PopulateUciParams(OptionsParser* options) {
@@ -78,6 +84,7 @@ void SelfPlayGame::PopulateUciParams(OptionsParser* options) {
   PopulateTimeManagementOptions(classic::RunType::kSelfplay, options);
   options->Add<StringOption>(kSyzygyTablebaseId);
   options->Add<FloatOption>(kOpeningStopProbId, 0.0f, 1.0f) = 0.0f;
+  options->Add<BoolOption>(kNoSoftAdjudicateId) = false;
 }
 
 SelfPlayGame::SelfPlayGame(PlayerOptions white, PlayerOptions black,
@@ -168,6 +175,9 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
     //   2. Run a real MCTS search through the dual backend so terminal /
     //      forced-mate detection kicks in via tree bounds — a single forward
     //      pass cannot prove mate-in-N for any N.
+    const bool no_soft_adjudicate =
+        options_[0].uci_options->Get<bool>(kNoSoftAdjudicateId) ||
+        options_[1].uci_options->Get<bool>(kNoSoftAdjudicateId);
     {
       const auto& last_pos = tree_[0]->GetPositionHistory().Last();
       // Diagnostic exception: if the GAME STARTED with both abilities already
@@ -177,7 +187,8 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
       const bool started_without_abilities =
           !start_pos.OurDoublemoveAvailable() &&
           !start_pos.TheirDoublemoveAvailable();
-      if (!started_without_abilities &&
+      if (!no_soft_adjudicate &&
+          !started_without_abilities &&
           !last_pos.OurDoublemoveAvailable() &&
           !last_pos.TheirDoublemoveAvailable() &&
           !last_pos.IsMidDoublemove()) {
@@ -190,10 +201,11 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
         adj_tree.SetStartingAbilities(/*white_has=*/false,
                                       /*black_has=*/false);
 
-        // Disable Dirichlet noise for adjudication; sticky_endgames stays at
-        // its configured default so terminal bounds propagate.
+        // Disable Dirichlet noise and force sticky endgames for adjudication so
+        // terminal bounds from forced lines propagate through the clean tree.
         OptionsDict adj_options(options_[idx].uci_options);
         adj_options.Set<float>(classic::SearchParams::kNoiseEpsilonId, 0.0f);
+        adj_options.Set<bool>(classic::SearchParams::kStickyEndgamesId, true);
 
         auto stoppers = options_[idx].search_limits.MakeSearchStopper();
         classic::PopulateIntrinsicStoppers(stoppers.get(), adj_options);

@@ -364,10 +364,14 @@ void Search::SendUciInfo() REQUIRES(nodes_mutex_) REQUIRES(counters_mutex_) {
     if (per_pv_counters) uci_info.nodes = edge.GetN();
     bool flip = played_history_.IsBlackToMove();
     int depth = 0;
-    for (auto iter = edge; iter;
-         iter = GetBestChildNoTemperature(iter.node(), depth), flip = !flip) {
+    for (auto iter = edge; iter;) {
+      const Move raw = iter.GetMove();
       uci_info.pv.push_back(iter.GetMove(flip));
       if (!iter.node()) break;  // Last edge was dangling, cannot continue.
+      // Double-move variant: ability-activation moves don't swap sides, so
+      // the PV perspective stays the same.
+      if (!raw.is_ability_activation()) flip = !flip;
+      iter = GetBestChildNoTemperature(iter.node(), depth);
       depth += 1;
     }
   }
@@ -467,6 +471,14 @@ std::vector<std::string> Search::GetVerboseStats(const Node* node) const {
   const float cpuct = ComputeCpuct(params_, node->GetN(), is_root);
   const float U_coeff =
       cpuct * std::sqrt(std::max(node->GetChildrenVisits(), 1u));
+  // Double-move variant: if the root is itself a mid-doublemove position
+  // (e.g. user probed after playing only half-1 of an ability burn), then
+  // previous-mover-at-root == side-to-move-at-root and the root's wl_ /
+  // cached NN value are already in side-to-move perspective. Stock display
+  // always negates the root's wl_/V to convert previous-mover → side-to-
+  // move; for a mid-double root that flips them the wrong way.
+  const bool root_is_mid_doublemove =
+      played_history_.Last().IsMidDoublemove();
   std::vector<std::tuple<uint32_t, float, EdgeAndNode>> edges;
   edges.reserve(node->GetNumEdges());
   for (const auto& edge : node->Edges()) {
@@ -489,7 +501,8 @@ std::vector<std::string> Search::GetVerboseStats(const Node* node) const {
     print(oss, "(P: ", p * 100, "%) ", 5, p >= 0.99995f ? 1 : 2);
   };
   auto print_stats = [&](auto* oss, const auto* n) {
-    const auto sign = n == node ? -1 : 1;
+    const int root_self_sign = root_is_mid_doublemove ? 1 : -1;
+    const auto sign = n == node ? root_self_sign : 1;
     if (n) {
       auto wl = sign * n->GetWL();
       auto d = n->GetD();
@@ -513,7 +526,8 @@ std::vector<std::string> Search::GetVerboseStats(const Node* node) const {
     }
   };
   auto print_tail = [&](auto* oss, const auto* n) {
-    const auto sign = n == node ? -1 : 1;
+    const int root_self_sign = root_is_mid_doublemove ? 1 : -1;
+    const auto sign = n == node ? root_self_sign : 1;
     std::optional<float> v;
     if (n && n->IsTerminal()) {
       v = n->GetQ(sign * draw_score);
@@ -521,7 +535,16 @@ std::vector<std::string> Search::GetVerboseStats(const Node* node) const {
       auto history = GetPositionHistoryAtNode(n);
       std::optional<EvalResult> nneval = backend_->GetCachedEvaluation(
           EvalPosition{history.GetPositions(), {}});
-      if (nneval) v = -nneval->q;
+      if (nneval) {
+        // The NN value head outputs from side-to-move-at-n perspective.
+        // Normally we negate to express it in previous-mover-at-n
+        // perspective (so the sign matches wl_). Mid-double children skip
+        // the negation because side-to-move-at-n equals previous-mover-at-n.
+        const bool ability_incoming =
+            n->GetParent() &&
+            n->GetOwnEdge()->GetMove().is_ability_activation();
+        v = ability_incoming ? nneval->q : -nneval->q;
+      }
     }
     if (v) {
       print(oss, "(V: ", sign * *v, ") ", 7, 4);
@@ -553,7 +576,10 @@ std::vector<std::string> Search::GetVerboseStats(const Node* node) const {
     std::ostringstream oss;
     oss << std::left;
     // TODO: should this be displaying transformed index?
-    print_head(&oss, edge.GetMove(is_black_to_move).ToString(true),
+    const std::string label =
+        edge.GetMove(is_black_to_move).ToString(true) +
+        (edge.GetMove().is_ability_activation() ? "[AB]" : "");
+    print_head(&oss, label,
                MoveToNNIndex(edge.GetMove(), 0), edge.GetN(),
                edge.GetNInFlight(), edge.GetP());
     print_stats(&oss, edge.node());
@@ -724,8 +750,13 @@ void Search::EnsureBestMoveKnown() REQUIRES(nodes_mutex_)
   final_bestmove_ = bestmove_edge.GetMove(played_history_.IsBlackToMove());
 
   if (bestmove_edge.GetN() > 0 && bestmove_edge.node()->HasChildren()) {
+    // Double-move variant: an ability-activated bestmove keeps the same side
+    // on move for the second half, so the ponder perspective must NOT flip.
+    const bool ponder_flip = bestmove_edge.GetMove().is_ability_activation()
+                                 ? played_history_.IsBlackToMove()
+                                 : !played_history_.IsBlackToMove();
     final_pondermove_ = GetBestChildNoTemperature(bestmove_edge.node(), 1)
-                            .GetMove(!played_history_.IsBlackToMove());
+                            .GetMove(ponder_flip);
   }
 }
 
@@ -2167,9 +2198,24 @@ int SearchWorker::PrefetchIntoCache(Node* node, int budget, bool is_odd_depth) {
         budget_to_spend = budget;
       }
     }
-    history_.Append(edge.GetMove());
+    // Double-move variant: ability-activation edges keep the same side to
+    // move (the half-1 mover plays half-2 next), so the board must NOT be
+    // mirrored. Without this, the prefetcher descends into a wrong-
+    // perspective position, queues that position's NN eval under the wrong
+    // hash, and the real mid-double child's cache lookup never hits.
+    // is_odd_depth also stays the same across an ability-activation step
+    // because depth-parity tracks side-to-move-vs-root.
+    const Move m = edge.GetMove();
+    const bool is_ability = m.is_ability_activation();
+    if (is_ability) {
+      history_.Append(m.WithoutAbilityActivation(),
+                      /*is_first_of_double=*/true);
+    } else {
+      history_.Append(m);
+    }
     const int budget_spent =
-        PrefetchIntoCache(edge.node(), budget_to_spend, !is_odd_depth);
+        PrefetchIntoCache(edge.node(), budget_to_spend,
+                          is_ability ? is_odd_depth : !is_odd_depth);
     history_.Pop();
     budget -= budget_spent;
     total_budget_spent += budget_spent;
@@ -2204,7 +2250,25 @@ void SearchWorker::FetchSingleNodeResult(NodeToProcess* node_to_process) {
     node_to_process->eval->m = node->GetM();
     return;
   }
-  node_to_process->eval->q = -node_to_process->eval->q;
+  // The NN value head outputs from the side-to-move-at-this-node perspective.
+  // Search stores wl_ in the "previous-mover-at-this-node" perspective so the
+  // alternating sign flips in backprop align with edges. For a NORMAL move
+  // into this node, those perspectives are opposite — so negate.
+  //
+  // Double-move variant: if this node was reached via an ability-activation
+  // edge, it's a mid-double position. The same player is on move (the half-1
+  // mover plays half-2 next), so previous-mover-at-node == side-to-move-at-
+  // node, and the NN value is already in the right perspective. Skipping
+  // the negation here is essential — without this, mid-double positions get
+  // their value backed up with the wrong sign and the search permanently
+  // misjudges ability moves whose post-half-1 NN value is favorable for the
+  // burner. (See docs/ABILITY_EDGE_SIGN_BUG.md.)
+  const bool ability_incoming =
+      node->GetParent() &&
+      node->GetOwnEdge()->GetMove().is_ability_activation();
+  if (!ability_incoming) {
+    node_to_process->eval->q = -node_to_process->eval->q;
+  }
   // For NN results, we need to populate policy as well as value.
   // First the value...
   if (params_.GetWDLRescaleRatio() != 1.0f ||
@@ -2348,65 +2412,63 @@ bool SearchWorker::MaybeSetBounds(Node* p, float m, int* n_to_fix,
   auto losing_m = 0.0f;
   auto prefer_tb = false;
 
-  // Aggregate (lower, upper) bounds across p's children, expressed in p's own
-  // perspective. Bound encoding (in the to-move side's perspective):
-  //   (-1,-1) Loss (initial and lowest)
+  // Determine the maximum (lower, upper) bounds across all children, expressed
+  // in p's own side perspective.
+  //   (-1,-1) Loss (initial and lowest bounds)
   //   (-1, 0) Can't Win
-  //   (-1, 1) Regular
+  //   (-1, 1) Regular node
   //   ( 0, 0) Draw
   //   ( 0, 1) Can't Lose
-  //   ( 1, 1) Win (highest)
+  //   ( 1, 1) Win (highest bounds)
   //
-  // Each edge's stored bound is in the CHILD's to-move perspective. For a
-  // normal edge the child is the opposite side, so the bound flips when we
-  // re-express it in p's perspective. For an ability-activation edge the
-  // child is the same side (the move skipped Mirror), so the bound passes
-  // through unchanged. Computing perspective per-edge is required because a
-  // node where the ability is still available has BOTH kinds of edges among
-  // its children, and aggregating then flipping at the end mixes
-  // perspectives. (Codex's earlier attempt only flipped based on p's
-  // incoming edge — that handled mid-double propagation but missed this.)
-  auto p_lower = GameResult::BLACK_WON;
-  auto p_upper = GameResult::BLACK_WON;
+  // A child's stored bound is in its "previous-mover" perspective, which is
+  // always p's side regardless of whether the edge is a normal move (p moved
+  // once, opponent is to move at the child) or an ability-activation move
+  // (p moved twice consecutively, with Mirror skipped, so p's side is still
+  // to move at the child). Either way, the child bound represents "value for
+  // p's side", so we max-aggregate directly without a per-edge flip.
+  auto lower = GameResult::BLACK_WON;
+  auto upper = GameResult::BLACK_WON;
   for (const auto& edge : p->Edges()) {
-    const auto [c_lower, c_upper] = edge.GetBounds();
-    GameResult e_lower, e_upper;
-    if (edge.GetMove().is_ability_activation()) {
-      e_lower = c_lower;
-      e_upper = c_upper;
-    } else {
-      e_lower = -c_upper;
-      e_upper = -c_lower;
-    }
-    p_lower = std::max(e_lower, p_lower);
-    p_upper = std::max(e_upper, p_upper);
+    const auto [edge_lower, edge_upper] = edge.GetBounds();
+    lower = std::max(edge_lower, lower);
+    upper = std::max(edge_upper, upper);
 
-    // p winning through some edge is the best, so short-circuit.
+    // Checkmate (a definite win for p's side via this edge) is the best, so
+    // short-circuit.
     const auto is_tb = edge.IsTbTerminal();
-    if (e_lower == GameResult::WHITE_WON && !is_tb) {
+    if (edge_lower == GameResult::WHITE_WON && !is_tb) {
       prefer_tb = false;
       break;
-    } else if (e_upper == GameResult::BLACK_WON) {
+    } else if (edge_upper == GameResult::BLACK_WON) {
       // Track the longest loss.
       losing_m = std::max(losing_m, edge.GetM(0.0f));
     }
     prefer_tb = prefer_tb || is_tb;
   }
 
-  // Nothing left to do for ancestors if p would be a regular node.
-  if (p_lower == GameResult::BLACK_WON && p_upper == GameResult::WHITE_WON) {
+  // p's bound is stored in its own "previous-mover" perspective. If p was
+  // reached from its parent via a normal edge, the previous mover at p is the
+  // opposite side, so we negate the aggregated bound; if via an ability
+  // edge, p and its parent share the same side, so the bound is stored as-is.
+  const bool same_player =
+      p->GetParent() && p->GetOwnEdge()->GetMove().is_ability_activation();
+
+  // Nothing left to do for ancestors if the parent would be a regular node.
+  if (lower == GameResult::BLACK_WON && upper == GameResult::WHITE_WON) {
     return false;
-  } else if (p_lower == p_upper) {
-    // Search can stop at p if the bounds can't change anymore, so make it
-    // terminal preferring shorter wins and longer losses.
+  } else if (lower == upper) {
+    // Search can stop at the parent if the bounds can't change anymore, so make
+    // it terminal preferring shorter wins and longer losses.
     *n_to_fix = p->GetN();
     assert(*n_to_fix > 0);
     float cur_v = p->GetWL();
     float cur_d = p->GetD();
     float cur_m = p->GetM();
+    const GameResult stored = same_player ? upper : -upper;
     p->MakeTerminal(
-        p_upper,
-        (p_upper == GameResult::BLACK_WON ? std::max(losing_m, m) : m) + 1.0f,
+        stored,
+        (upper == GameResult::BLACK_WON ? std::max(losing_m, m) : m) + 1.0f,
         prefer_tb ? Node::Terminal::Tablebase : Node::Terminal::EndOfGame);
     // Negate v_delta because we're calculating for the parent, but immediately
     // afterwards we'll negate v_delta in case it has come from the child.
@@ -2414,7 +2476,10 @@ bool SearchWorker::MaybeSetBounds(Node* p, float m, int* n_to_fix,
     *d_delta = p->GetD() - cur_d;
     *m_delta = p->GetM() - cur_m;
   } else {
-    p->SetBounds(p_lower, p_upper);
+    // Store the aggregated bounds in p's own previous-mover perspective.
+    const auto stored_lower = same_player ? lower : -upper;
+    const auto stored_upper = same_player ? upper : -lower;
+    p->SetBounds(stored_lower, stored_upper);
   }
 
   // Bounds were set, so indicate we should check the parent too.

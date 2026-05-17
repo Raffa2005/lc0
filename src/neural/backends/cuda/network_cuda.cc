@@ -27,6 +27,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
+#include <iostream>
 #include <list>
 #include <memory>
 #include <mutex>
