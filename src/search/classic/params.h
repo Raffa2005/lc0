@@ -83,6 +83,7 @@ class BaseSearchParams {
   }
   float GetNoiseEpsilon() const { return kNoiseEpsilon; }
   float GetNoiseAlpha() const { return kNoiseAlpha; }
+  bool GetSplitAbilityRootNoise() const { return kSplitAbilityRootNoise; }
   bool GetVerboseStats() const { return options_.Get<bool>(kVerboseStatsId); }
   bool GetLogLiveStats() const { return options_.Get<bool>(kLogLiveStatsId); }
   bool GetFpuAbsolute(bool at_root) const {
@@ -183,6 +184,7 @@ class BaseSearchParams {
   static const OptionId kTemperatureVisitOffsetId;
   static const OptionId kNoiseEpsilonId;
   static const OptionId kNoiseAlphaId;
+  static const OptionId kSplitAbilityRootNoiseId;
   static const OptionId kVerboseStatsId;
   static const OptionId kLogLiveStatsId;
   static const OptionId kFpuStrategyId;
@@ -253,6 +255,7 @@ class BaseSearchParams {
   const bool kTwoFoldDraws;
   const float kNoiseEpsilon;
   const float kNoiseAlpha;
+  const bool kSplitAbilityRootNoise;
   const bool kFpuAbsolute;
   const float kFpuValue;
   const bool kFpuAbsoluteAtRoot;

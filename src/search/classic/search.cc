@@ -33,6 +33,7 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <sstream>
 #include <thread>
 
@@ -199,6 +200,12 @@ Search::Search(const NodeTree& tree, Backend* backend,
 }
 
 namespace {
+float EdgePriorTotal(const std::vector<Edge*>& edges) {
+  float total = 0.0f;
+  for (const auto* edge : edges) total += edge->GetP();
+  return total;
+}
+
 void ApplyDirichletNoise(Node* node, float eps, double alpha) {
   float total = 0;
   std::vector<float> noise;
@@ -216,6 +223,77 @@ void ApplyDirichletNoise(Node* node, float eps, double alpha) {
     auto* edge = child.edge();
     edge->SetP(edge->GetP() * (1 - eps) + eps * noise[noise_idx++] / total);
   }
+}
+
+void SetNoisyBranchP(const std::vector<Edge*>& edges, float branch_mass,
+                     float eps, double alpha) {
+  if (edges.empty()) return;
+
+  const float prior_total = EdgePriorTotal(edges);
+  const bool has_prior = prior_total >= std::numeric_limits<float>::min();
+
+  float noise_total = 0.0f;
+  std::vector<float> noise;
+  if (eps > 0.0f && alpha > 0.0) {
+    noise.reserve(edges.size());
+    for (size_t i = 0; i < edges.size(); ++i) {
+      const float eta = Random::Get().GetGamma(alpha, 1.0);
+      noise.emplace_back(eta);
+      noise_total += eta;
+    }
+  }
+  const bool has_noise = noise_total >= std::numeric_limits<float>::min();
+  const float uniform = 1.0f / edges.size();
+
+  for (size_t i = 0; i < edges.size(); ++i) {
+    const float prior = has_prior ? edges[i]->GetP() / prior_total : uniform;
+    const float eta = has_noise ? noise[i] / noise_total : prior;
+    const float mixed = prior * (1 - eps) + eps * eta;
+    edges[i]->SetP(branch_mass * mixed);
+  }
+}
+
+void ApplySplitAbilityDirichletNoise(Node* node, float eps, double alpha) {
+  std::vector<Edge*> normal_edges;
+  std::vector<Edge*> ability_edges;
+  normal_edges.reserve(node->GetNumEdges());
+  ability_edges.reserve(node->GetNumEdges());
+
+  for (const auto& child : node->Edges()) {
+    auto* edge = child.edge();
+    if (edge->GetMove().is_ability_activation()) {
+      ability_edges.emplace_back(edge);
+    } else {
+      normal_edges.emplace_back(edge);
+    }
+  }
+
+  if (ability_edges.empty() || normal_edges.empty()) {
+    ApplyDirichletNoise(node, eps, alpha);
+    return;
+  }
+  if (alpha <= 0.0) return;
+
+  const float ability_prior = EdgePriorTotal(ability_edges);
+  const float normal_prior = EdgePriorTotal(normal_edges);
+  const float prior_total = ability_prior + normal_prior;
+  if (prior_total < std::numeric_limits<float>::min()) return;
+
+  const double ability_shape = alpha * ability_edges.size();
+  const double normal_shape = alpha * normal_edges.size();
+  const float ability_eta = Random::Get().GetGamma(ability_shape, 1.0);
+  const float normal_eta = Random::Get().GetGamma(normal_shape, 1.0);
+  const float gate_eta_total = ability_eta + normal_eta;
+  if (gate_eta_total < std::numeric_limits<float>::min()) return;
+
+  const float gate_prior = ability_prior / prior_total;
+  const float gate_noise = ability_eta / gate_eta_total;
+  const float ability_mass = std::clamp(gate_prior * (1 - eps) +
+                                            gate_noise * eps,
+                                        0.0f, 1.0f);
+
+  SetNoisyBranchP(ability_edges, ability_mass, eps, alpha);
+  SetNoisyBranchP(normal_edges, 1.0f - ability_mass, eps, alpha);
 }
 }  // namespace
 
@@ -2290,8 +2368,13 @@ void SearchWorker::FetchSingleNodeResult(NodeToProcess* node_to_process) {
   }
   // Add Dirichlet noise if enabled and at root.
   if (params_.GetNoiseEpsilon() && node == search_->root_node_) {
-    ApplyDirichletNoise(node, params_.GetNoiseEpsilon(),
-                        params_.GetNoiseAlpha());
+    if (params_.GetSplitAbilityRootNoise()) {
+      ApplySplitAbilityDirichletNoise(node, params_.GetNoiseEpsilon(),
+                                      params_.GetNoiseAlpha());
+    } else {
+      ApplyDirichletNoise(node, params_.GetNoiseEpsilon(),
+                          params_.GetNoiseAlpha());
+    }
   }
   node->SortEdges();
 }

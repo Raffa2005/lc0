@@ -290,6 +290,13 @@ const OptionId BaseSearchParams::kNoiseAlphaId{
                   "probabilities. Larger values result in flatter / more "
                   "evenly distributed values.",
      .visibility = OptionId::kProOnly}};
+const OptionId BaseSearchParams::kSplitAbilityRootNoiseId{
+    {.long_flag = "split-ability-root-noise",
+     .uci_option = "SplitAbilityRootNoise",
+     .help_text =
+         "Double-move training mode: split root exploration noise into a "
+         "burn-vs-normal gate draw plus independent within-branch move draws.",
+     .visibility = OptionId::kProOnly}};
 const OptionId BaseSearchParams::kVerboseStatsId{
     "verbose-move-stats", "VerboseMoveStats",
     "Display Q, V, N, U and P values of every move candidate after each move.",
@@ -572,6 +579,7 @@ void BaseSearchParams::Populate(OptionsParser* options) {
       0.0f;
   options->Add<FloatOption>(kNoiseEpsilonId, 0.0f, 1.0f) = 0.0f;
   options->Add<FloatOption>(kNoiseAlphaId, 0.0f, 10000000.0f) = 0.3f;
+  options->Add<BoolOption>(kSplitAbilityRootNoiseId) = false;
   options->Add<BoolOption>(kVerboseStatsId) = false;
   options->Add<BoolOption>(kLogLiveStatsId) = false;
   std::vector<std::string> fpu_strategy = {"reduction", "absolute"};
@@ -667,6 +675,7 @@ BaseSearchParams::BaseSearchParams(const OptionsDict& options)
       kTwoFoldDraws(options.Get<bool>(kTwoFoldDrawsId)),
       kNoiseEpsilon(options.Get<float>(kNoiseEpsilonId)),
       kNoiseAlpha(options.Get<float>(kNoiseAlphaId)),
+      kSplitAbilityRootNoise(options.Get<bool>(kSplitAbilityRootNoiseId)),
       kFpuAbsolute(options.Get<std::string>(kFpuStrategyId) == "absolute"),
       kFpuValue(options.Get<float>(kFpuValueId)),
       kFpuAbsoluteAtRoot(
