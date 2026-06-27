@@ -66,12 +66,14 @@ const OptionId kOpeningStopProbId{
     "opening-stop-prob", "OpeningStopProb",
     "From each opening move, start a self-play game with probability max(p, "
     "1/n), where p is the value given and n the opening moves remaining."};
-const OptionId kNoSoftAdjudicateId{
-    "no-soft-adjudicate", "NoSoftAdjudicate",
-    "Disable the soft-adjudication that triggers when both players' "
-    "double-move abilities are exhausted. Games then play out to natural "
-    "termination (checkmate, stalemate, threefold, 50-move rule, or the 450-"
-    "ply cap)."};
+const OptionId kSoftAdjudicateRateId{
+    "soft-adjudicate-rate", "SoftAdjudicateRate",
+    "Probability that a selfplay game soft-adjudicates when both players' "
+    "double-move abilities are exhausted. 1.0 = always adjudicate (historical "
+    "default), 0.0 = never adjudicate (play to natural termination or the "
+    "450-ply cap), 0 < r < 1 = per-game Bernoulli with rate r. Used to mix "
+    "ability-rich short games and standard-chess full-length games in the "
+    "same training run."};
 }  // namespace
 
 void SelfPlayGame::PopulateUciParams(OptionsParser* options) {
@@ -84,7 +86,7 @@ void SelfPlayGame::PopulateUciParams(OptionsParser* options) {
   PopulateTimeManagementOptions(classic::RunType::kSelfplay, options);
   options->Add<StringOption>(kSyzygyTablebaseId);
   options->Add<FloatOption>(kOpeningStopProbId, 0.0f, 1.0f) = 0.0f;
-  options->Add<BoolOption>(kNoSoftAdjudicateId) = false;
+  options->Add<FloatOption>(kSoftAdjudicateRateId, 0.0f, 1.0f) = 1.0f;
 }
 
 SelfPlayGame::SelfPlayGame(PlayerOptions white, PlayerOptions black,
@@ -108,35 +110,48 @@ SelfPlayGame::SelfPlayGame(PlayerOptions white, PlayerOptions black,
     tree_[1]->ResetToPosition(orig_fen_, {});
     tree_[1]->SetStartingAbilities(white_has_ability, black_has_ability);
   }
-  int ply = 0;
-  auto white_prob = white.uci_options->Get<float>(kOpeningStopProbId);
-  auto black_prob = black.uci_options->Get<float>(kOpeningStopProbId);
-  if (white_prob != black_prob && white_prob != 0 && black_prob != 0) {
-    throw Exception("Stop probabilities must be both equal or zero!");
-  }
-
-  for (Move m : opening.moves) {
-    // For early exit from the opening, we support two cases: a) where both
-    // sides have the same exit probability and b) where one side's exit
-    // probability is zero. In the following formula, `positions` is the number
-    // of possible exit points remaining, used for adjusting the exit
-    // probability (to avoid favoring the last position).
-    auto exit_prob_now = tree_[0]->IsBlackToMove() ? black_prob : white_prob;
-    auto exit_prob_next = tree_[0]->IsBlackToMove() ? white_prob : black_prob;
-    int positions = opening.moves.size() - ply + 1;
-    if (exit_prob_now > 0.0f &&
-        Random::Get().GetFloat(1.0f) <
-            std::max(exit_prob_now,
-                     exit_prob_now / (exit_prob_now * ((positions + 1) / 2) +
-                                      exit_prob_next * (positions / 2)))) {
-      break;
+  if (opening.uci_moves) {
+    const auto state = MakeGameStateFromUci(orig_fen_, *opening.uci_moves);
+    tree_[0]->ResetToPosition(state);
+    if (tree_[0] != tree_[1]) tree_[1]->ResetToPosition(state);
+    start_ply_ = state.moves.size();
+  } else {
+    int ply = 0;
+    auto white_prob = white.uci_options->Get<float>(kOpeningStopProbId);
+    auto black_prob = black.uci_options->Get<float>(kOpeningStopProbId);
+    if (white_prob != black_prob && white_prob != 0 && black_prob != 0) {
+      throw Exception("Stop probabilities must be both equal or zero!");
     }
-    if (tree_[0]->IsBlackToMove()) m.Flip();
-    tree_[0]->MakeMove(m);
-    if (tree_[0] != tree_[1]) tree_[1]->MakeMove(m);
-    ply++;
+
+    for (Move m : opening.moves) {
+      // For early exit from the opening, we support two cases: a) where both
+      // sides have the same exit probability and b) where one side's exit
+      // probability is zero. In the following formula, `positions` is the
+      // number of possible exit points remaining, used for adjusting the exit
+      // probability (to avoid favoring the last position).
+      auto exit_prob_now =
+          tree_[0]->IsBlackToMove() ? black_prob : white_prob;
+      auto exit_prob_next =
+          tree_[0]->IsBlackToMove() ? white_prob : black_prob;
+      int positions = opening.moves.size() - ply + 1;
+      if (exit_prob_now > 0.0f &&
+          Random::Get().GetFloat(1.0f) <
+              std::max(exit_prob_now,
+                       exit_prob_now /
+                           (exit_prob_now * ((positions + 1) / 2) +
+                            exit_prob_next * (positions / 2)))) {
+        break;
+      }
+      if (tree_[0]->IsBlackToMove()) m.Flip();
+      tree_[0]->MakeMove(m);
+      if (tree_[0] != tree_[1]) tree_[1]->MakeMove(m);
+      ply++;
+    }
+    start_ply_ = ply;
   }
-  start_ply_ = ply;
+  terminal_start_ =
+      tree_[0]->GetPositionHistory().ComputeGameResult() !=
+      GameResult::UNDECIDED;
 }
 
 void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
@@ -175,9 +190,11 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
     //   2. Run a real MCTS search through the dual backend so terminal /
     //      forced-mate detection kicks in via tree bounds — a single forward
     //      pass cannot prove mate-in-N for any N.
-    const bool no_soft_adjudicate =
-        options_[0].uci_options->Get<bool>(kNoSoftAdjudicateId) ||
-        options_[1].uci_options->Get<bool>(kNoSoftAdjudicateId);
+    // Decide once per game (lazily, on first reaching the abilities-exhausted
+    // gate) whether this game should soft-adjudicate. Decision is cached in
+    // soft_adjudicate_decision_ so subsequent iterations of this loop see the
+    // same answer; otherwise we'd reroll the dice every ply once both
+    // abilities are spent.
     {
       const auto& last_pos = tree_[0]->GetPositionHistory().Last();
       // Diagnostic exception: if the GAME STARTED with both abilities already
@@ -187,7 +204,19 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
       const bool started_without_abilities =
           !start_pos.OurDoublemoveAvailable() &&
           !start_pos.TheirDoublemoveAvailable();
-      if (!no_soft_adjudicate &&
+      if (!soft_adjudicate_decided_ &&
+          !started_without_abilities &&
+          !last_pos.OurDoublemoveAvailable() &&
+          !last_pos.TheirDoublemoveAvailable() &&
+          !last_pos.IsMidDoublemove()) {
+        const float rate =
+            options_[0].uci_options->Get<float>(kSoftAdjudicateRateId);
+        soft_adjudicate_this_game_ =
+            (rate >= 1.0f) ||
+            (rate > 0.0f && Random::Get().GetFloat(1.0f) < rate);
+        soft_adjudicate_decided_ = true;
+      }
+      if (soft_adjudicate_decided_ && soft_adjudicate_this_game_ &&
           !started_without_abilities &&
           !last_pos.OurDoublemoveAvailable() &&
           !last_pos.TheirDoublemoveAvailable() &&
@@ -356,7 +385,9 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
       if (history_copy.ComputeGameResult() == GameResult::UNDECIDED) {
         auto move_list_to_discard = GetMoves();
         move_list_to_discard.push_back(move);
-        options_[idx].discarded_callback({orig_fen_, move_list_to_discard});
+        options_[idx].discarded_callback(
+            {orig_fen_, move_list_to_discard, std::nullopt, std::nullopt,
+             std::nullopt});
       }
       search_->ResetBestMove();
     }

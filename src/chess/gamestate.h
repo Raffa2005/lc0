@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "chess/position.h"
@@ -44,5 +45,10 @@ struct GameState {
   // Returns positions after all moves, including the starting and the last one.
   std::vector<Position> GetPositions() const;
 };
+
+// Parses the same coordinate-move sequence accepted by the UCI
+// `position <fen> moves ...` command, including double-move activation `+`.
+GameState MakeGameStateFromUci(const std::string& fen,
+                               const std::vector<std::string>& moves);
 
 }  // namespace lczero

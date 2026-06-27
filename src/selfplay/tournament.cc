@@ -88,6 +88,10 @@ const OptionId kDiscardedStartChanceId{
 const OptionId kOpeningsFileId{
     "openings-pgn", "OpeningsPgnFile",
     "A path name to a pgn file containing openings to use."};
+const OptionId kOpeningsScheduleId{
+    "openings-schedule", "OpeningsScheduleFile",
+    "A tab-separated UCI opening schedule with columns opening id, player1 "
+    "color, and coordinate move sequence."};
 const OptionId kOpeningsMirroredId{
     "mirror-openings", "MirrorOpenings",
     "If true, each opening will be played in pairs. "
@@ -146,6 +150,7 @@ void SelfPlayTournament::PopulateOptions(OptionsParser* options) {
   options->Add<FloatOption>(kResignPlaythroughId, 0.0f, 100.0f) = 0.0f;
   options->Add<FloatOption>(kDiscardedStartChanceId, 0.0f, 100.0f) = 0.0f;
   options->Add<StringOption>(kOpeningsFileId) = "";
+  options->Add<StringOption>(kOpeningsScheduleId) = "";
   options->Add<BoolOption>(kOpeningsMirroredId) = false;
   std::vector<std::string> openings_modes = {"sequential", "shuffled",
                                              "random"};
@@ -205,12 +210,41 @@ SelfPlayTournament::SelfPlayTournament(const OptionsDict& options,
         kAsymmetricRate(options.Get<float>(kAsymmetricRateId)) {
   multi_games_size_ = std::max(kPolicyGamesSize, kValueGamesSize);
   std::string book = options.Get<std::string>(kOpeningsFileId);
+  std::string schedule = options.Get<std::string>(kOpeningsScheduleId);
+  if (!book.empty() && !schedule.empty()) {
+    throw Exception(
+        "Use only one of --openings-pgn and --openings-schedule.");
+  }
   if (!book.empty()) {
     PgnReader book_reader;
     book_reader.AddPgnFile(book);
     openings_ = book_reader.ReleaseGames();
     if (options.Get<std::string>(kOpeningsModeId) == "shuffled") {
       Random::Get().Shuffle(openings_.begin(), openings_.end());
+    }
+  }
+  if (!schedule.empty()) {
+    scheduled_openings_ = true;
+    openings_ = ReadUciOpeningSchedule(schedule);
+    if (multi_games_size_ > 0) {
+      throw Exception(
+          "Scheduled openings are not supported in policy/value multi-game "
+          "mode.");
+    }
+    if (kAbilityMode != "normal") {
+      throw Exception("Scheduled openings require ability-mode=normal.");
+    }
+    if (options.Get<bool>(kOpeningsMirroredId) ||
+        options.Get<std::string>(kOpeningsModeId) != "sequential" ||
+        kDiscardedStartChance != 0.0f) {
+      throw Exception(
+          "Scheduled openings require sequential mode, mirror-openings=false, "
+          "and discarded-start-chance=0.");
+    }
+    if (kTotalGames < 0 ||
+        static_cast<size_t>(kTotalGames) != openings_.size()) {
+      throw Exception(
+          "Scheduled openings require --games to equal the schedule size.");
     }
   }
   if (kPolicyGamesSize > 0 && kValueGamesSize > 0) {
@@ -231,7 +265,7 @@ SelfPlayTournament::SelfPlayTournament(const OptionsDict& options,
         "opening book more than once.");
   }
   // If playing just one game, the player1 is white, otherwise randomize.
-  if (kTotalGames != 1) {
+  if (!scheduled_openings_ && kTotalGames != 1) {
     first_game_black_ = Random::Get().GetBool();
   }
 
@@ -332,8 +366,13 @@ void SelfPlayTournament::PlayOneGame(int game_number) {
   Opening opening;
   {
     Mutex::Lock lock(mutex_);
-    player1_black = ((game_number % 2) == 1) != first_game_black_;
-    if (!openings_.empty()) {
+    if (scheduled_openings_) {
+      opening = openings_.at(game_number);
+      player1_black = *opening.player1_black;
+    } else {
+      player1_black = ((game_number % 2) == 1) != first_game_black_;
+    }
+    if (!scheduled_openings_ && !openings_.empty()) {
       if (player_options_[0][0].Get<bool>(kOpeningsMirroredId)) {
         opening = openings_[(game_number / 2) % openings_.size()];
       } else if (player_options_[0][0].Get<std::string>(kOpeningsModeId) ==
@@ -494,6 +533,8 @@ void SelfPlayTournament::PlayOneGame(int game_number) {
     game_info.soft_d = game.GetSoftResultD();
     game_info.is_black = player1_black;
     game_info.game_id = game_number;
+    game_info.opening_id = opening.id;
+    game_info.opening_terminal = game.IsTerminalStart();
     game_info.initial_fen = opening.start_fen;
     game_info.moves = game.GetMoves();
     game_info.play_start_ply = game.GetStartPly();

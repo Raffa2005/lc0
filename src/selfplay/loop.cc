@@ -81,6 +81,11 @@ void SelfPlayLoop::SendGameInfo(const GameInfo& info) {
   if (!info.training_filename.empty())
     res += " trainingfile " + info.training_filename;
   if (info.game_id != -1) res += " gameid " + std::to_string(info.game_id);
+  if (info.opening_id) {
+    res += " openingid " + *info.opening_id;
+    res += std::string(" openingterminal ") +
+           (info.opening_terminal ? "true" : "false");
+  }
   res += " play_start_ply " + std::to_string(info.play_start_ply);
   if (info.is_black)
     res += " player1 " + std::string(*info.is_black ? "black" : "white");
@@ -149,8 +154,11 @@ void SelfPlayLoop::SendTournament(const TournamentInfo& info) {
       << " avg " << std::fixed << std::setprecision(3)
       << avg(info.score_sum[1], info.game_count[1]);
 
-  oss << " npm " + std::to_string(static_cast<double>(info.nodes_total_) /
-                                  info.move_count_);
+  const double npm =
+      info.move_count_ > 0
+          ? static_cast<double>(info.nodes_total_) / info.move_count_
+          : 0.0;
+  oss << " npm " + std::to_string(npm);
   oss << " nodes " + std::to_string(info.nodes_total_);
   oss << " moves " + std::to_string(info.move_count_);
   uci_responder_->SendRawResponse(oss.str());

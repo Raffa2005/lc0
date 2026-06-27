@@ -140,6 +140,93 @@ class NetworkAsBackendComputation : public BackendComputation {
     LCTRACE_FUNCTION_SCOPE;
     const std::vector<Move>& moves = entries_[idx].legal_moves;
     const int transform = entries_[idx].transform;
+
+    // Double-move split-policy heads with a burn gate return log-probabilities
+    // already composed over the full 3716-action surface:
+    //   log((1-gate) * softmax(normal_logits over all 1858 actions))
+    //   log(gate       * softmax(ability_logits over all 1858 actions))
+    // Training, however, uses illegal_moves=MASK and normalizes each branch on
+    // legal moves only. If search then softmaxes the full-composed values over
+    // legal moves, illegal ability logits can absorb almost all ability-branch
+    // mass and make the visible burn prior much smaller than the trained gate.
+    //
+    // Detect this composed-logprob representation by summing exp(policy) over
+    // the full surface. Raw-logit heads do not sum to ~1 and fall back to the
+    // ordinary legal softmax below. For composed heads, recover the raw gate as
+    // total ability mass, then renormalize normal and ability branches
+    // separately over the legal moves before applying that gate.
+    float full_normal = 0.0f;
+    float full_ability = 0.0f;
+    for (int j = 0; j < 1858; ++j) {
+      full_normal += FastExp(computation->GetPVal(idx, j));
+      full_ability += FastExp(computation->GetPVal(idx, 1858 + j));
+    }
+    const float full_total = full_normal + full_ability;
+    const bool looks_like_composed_split_policy =
+        full_total > 0.5f && full_total < 1.5f && full_normal > 1e-8f;
+
+    if (looks_like_composed_split_policy) {
+      std::vector<float> legal_logits(moves.size());
+      float normal_max = -std::numeric_limits<float>::infinity();
+      float ability_max = -std::numeric_limits<float>::infinity();
+      for (size_t i = 0; i < moves.size(); ++i) {
+        const Move& move = moves[i];
+        const int nn_idx =
+            move.is_ability_activation()
+                ? MoveToNNIndex(move.WithoutAbilityActivation(), transform) +
+                      1858
+                : MoveToNNIndex(move, transform);
+        const float logp = computation->GetPVal(idx, nn_idx);
+        legal_logits[i] = logp;
+        if (move.is_ability_activation()) {
+          ability_max = std::max(ability_max, logp);
+        } else {
+          normal_max = std::max(normal_max, logp);
+        }
+      }
+
+      const float temperature = backend_->softmax_policy_temperature_;
+      std::vector<float> legal_probs(moves.size());
+      float legal_normal = 0.0f;
+      float legal_ability = 0.0f;
+      for (size_t i = 0; i < moves.size(); ++i) {
+        const bool is_ability = moves[i].is_ability_activation();
+        const float branch_max = is_ability ? ability_max : normal_max;
+        const float prob = FastExp((legal_logits[i] - branch_max) * temperature);
+        legal_probs[i] = prob;
+        if (is_ability) {
+          legal_ability += prob;
+        } else {
+          legal_normal += prob;
+        }
+      }
+
+      const bool has_legal_normal = legal_normal > 0.0f;
+      const bool has_legal_ability = legal_ability > 0.0f;
+      const float normal_gate = full_normal / full_total;
+      const float ability_gate = full_ability / full_total;
+      const float legal_gate_total =
+          (has_legal_normal ? normal_gate : 0.0f) +
+          (has_legal_ability ? ability_gate : 0.0f);
+      const float legal_gate_scale =
+          legal_gate_total > 0.0f ? 1.0f / legal_gate_total : 1.0f;
+
+      for (size_t i = 0; i < moves.size(); ++i) {
+        if (moves[i].is_ability_activation()) {
+          dst[i] = has_legal_ability
+                       ? legal_gate_scale * ability_gate *
+                             (legal_probs[i] / legal_ability)
+                       : 0.0f;
+        } else {
+          dst[i] = has_legal_normal
+                       ? legal_gate_scale * normal_gate *
+                             (legal_probs[i] / legal_normal)
+                       : 0.0f;
+        }
+      }
+      return;
+    }
+
     // Copy the values to the destination array and compute the maximum.
     const float max_p = std::accumulate(
         moves.begin(), moves.end(), -std::numeric_limits<float>::infinity(),

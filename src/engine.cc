@@ -71,27 +71,6 @@ void Engine::PopulateOptions(OptionsParser* options) {
   options->Add<BoolOption>(kPreload) = false;
 }
 
-namespace {
-GameState MakeGameState(const std::string& fen,
-                        const std::vector<std::string>& moves) {
-  GameState state;
-  state.startpos = Position::FromFen(fen);
-  ChessBoard cur_board = state.startpos.GetBoard();
-  state.moves.reserve(moves.size());
-  for (const auto& move : moves) {
-    Move m = cur_board.ParseMove(move);
-    state.moves.push_back(m);
-    cur_board.ApplyMove(m);
-    // Double-move variant: an ability-activated move is half-1 of a
-    // double-move; the same side plays half-2 next, so don't swap perspective.
-    if (!m.is_ability_activation()) {
-      cur_board.Mirror();
-    }
-  }
-  return state;
-}
-}  // namespace
-
 class Engine::UciPonderForwarder : public UciResponder {
  public:
   UciPonderForwarder(Engine* engine) : engine_(engine) {}
@@ -228,7 +207,7 @@ void Engine::SetPosition(const std::string& fen,
   search_->StartClock();
   UpdateBackendConfig();
   EnsureSyzygyTablebasesLoaded();
-  last_position_ = MakeGameState(fen, moves);
+  last_position_ = MakeGameStateFromUci(fen, moves);
   if (!ponder_enabled_) InitializeSearchPosition(/*for_ponder=*/false);
 }
 

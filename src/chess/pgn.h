@@ -34,9 +34,12 @@
 #include <cerrno>
 #include <fstream>
 #include <optional>
+#include <set>
+#include <sstream>
 
 #include "chess/bitboard.h"
 #include "chess/board.h"
+#include "chess/gamestate.h"
 #include "utils/exception.h"
 #include "utils/logging.h"
 
@@ -45,7 +48,80 @@ namespace lczero {
 struct Opening {
   std::string start_fen = ChessBoard::kStartposFen;
   MoveList moves;
+  std::optional<std::string> id;
+  std::optional<bool> player1_black;
+  std::optional<std::vector<std::string>> uci_moves;
 };
+
+inline Opening ParseUciOpeningScheduleLine(const std::string& line,
+                                           int line_number) {
+  const auto first_tab = line.find('\t');
+  const auto second_tab =
+      first_tab == std::string::npos ? std::string::npos
+                                     : line.find('\t', first_tab + 1);
+  if (first_tab == std::string::npos || second_tab == std::string::npos) {
+    throw Exception("Invalid UCI opening schedule line " +
+                    std::to_string(line_number) +
+                    ": expected ID<TAB>COLOR<TAB>MOVES.");
+  }
+
+  const std::string id = line.substr(0, first_tab);
+  const std::string color =
+      line.substr(first_tab + 1, second_tab - first_tab - 1);
+  if (id.empty() || id.find_first_of(" \t\r\n") != std::string::npos) {
+    throw Exception("Invalid UCI opening id on line " +
+                    std::to_string(line_number) + ".");
+  }
+  if (color != "white" && color != "black") {
+    throw Exception("Invalid player1 color on UCI opening schedule line " +
+                    std::to_string(line_number) +
+                    ": expected white or black.");
+  }
+
+  std::vector<std::string> uci_moves;
+  std::istringstream moves_stream(line.substr(second_tab + 1));
+  std::string move;
+  while (moves_stream >> move) uci_moves.push_back(move);
+
+  GameState state =
+      MakeGameStateFromUci(ChessBoard::kStartposFen, uci_moves);
+  if (state.CurrentPosition().IsMidDoublemove()) {
+    throw Exception("UCI opening schedule line " +
+                    std::to_string(line_number) +
+                    " ends after ability activation; include move two.");
+  }
+  return {ChessBoard::kStartposFen, {}, id, color == "black",
+          std::move(uci_moves)};
+}
+
+inline std::vector<Opening> ReadUciOpeningSchedule(
+    const std::string& filepath) {
+  std::ifstream file(filepath);
+  if (!file) {
+    throw Exception(errno == ENOENT ? "UCI opening schedule file not found."
+                                    : "Error opening UCI opening schedule.");
+  }
+
+  std::vector<Opening> openings;
+  std::set<std::string> ids;
+  std::string line;
+  int line_number = 0;
+  while (std::getline(file, line)) {
+    ++line_number;
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.empty() || line[0] == '#') continue;
+    Opening opening = ParseUciOpeningScheduleLine(line, line_number);
+    if (!ids.insert(*opening.id).second) {
+      throw Exception("Duplicate UCI opening id on line " +
+                      std::to_string(line_number) + ": " + *opening.id);
+    }
+    openings.push_back(std::move(opening));
+  }
+  if (openings.empty()) {
+    throw Exception("UCI opening schedule is empty.");
+  }
+  return openings;
+}
 
 inline bool GzGetLine(gzFile file, std::string& line) {
   bool flag = false;
@@ -166,7 +242,8 @@ class PgnReader {
 
  private:
   void Flush() {
-    games_.push_back({cur_startpos_, cur_game_});
+    games_.push_back({cur_startpos_, cur_game_, std::nullopt, std::nullopt,
+                      std::nullopt});
     cur_game_.clear();
     cur_board_.SetFromFen(ChessBoard::kStartposFen);
     cur_startpos_ = ChessBoard::kStartposFen;

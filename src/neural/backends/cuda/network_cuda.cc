@@ -578,9 +578,23 @@ class CudaNetwork : public Network {
         }
 
         if (gate_hidden_size_ > 0) {
+          // The learned burn gate is trained on the policy-token
+          // representation:
+          //
+          //   x = activation(shared_policy_embedding(encoder_output))
+          //   gate = gate_dense(gelu(gate_embed(mean(x))))
+          //
+          // Do not feed the gate directly from encoder_last_. The encoder and
+          // policy-token tensors can have the same channel count (BT3: 768),
+          // so that mistake silently runs but evaluates a different function
+          // from the one trained in JAX.
+          gate_policy_embed_layer_ =
+              std::make_unique<EmbeddingLayer<DataType>>(
+                  encoder_last_, head.ip_pol_w, head.ip_pol_b, scratch_mem_,
+                  act);
           gate_embed_layer_ = std::make_unique<EmbeddingLayer<DataType>>(
-              encoder_last_, head.ip_pol_gate_w, head.ip_pol_gate_b,
-              scratch_mem_, ACTIVATION_NONE);
+              gate_policy_embed_layer_.get(), head.ip_pol_gate_w,
+              head.ip_pol_gate_b, scratch_mem_, ACTIVATION_NONE);
         }
 
       } else {
@@ -958,11 +972,13 @@ class CudaNetwork : public Network {
                             compute_stream);  // ability policy map
       }
       if (gate_embed_layer_) {
-        gate_embed_layer_->Eval(batchSize, spare1, flow, nullptr, scratch_mem,
-                                scratch_size_, nullptr, cublas,
-                                compute_stream);
+        gate_policy_embed_layer_->Eval(batchSize, spare1, flow, nullptr,
+                                       scratch_mem, scratch_size_, nullptr,
+                                       cublas, compute_stream);
+        gate_embed_layer_->Eval(batchSize, spare2, spare1, nullptr, scratch_mem,
+                                scratch_size_, nullptr, cublas, compute_stream);
         globalAvgPool(batchSize, gate_hidden_size_, io->op_gate_mem_gpu_,
-                      spare1, static_cast<const DataType*>(nullptr), true,
+                      spare2, static_cast<const DataType*>(nullptr), true,
                       compute_stream);
       }
 
@@ -1268,6 +1284,7 @@ class CudaNetwork : public Network {
   int gate_hidden_size_ = 0;
   std::vector<float> gate_dense1_w_;
   float gate_dense1_b_ = 0.0f;
+  std::unique_ptr<EmbeddingLayer<DataType>> gate_policy_embed_layer_;
   std::unique_ptr<EmbeddingLayer<DataType>> gate_embed_layer_;
   int num_encoder_blocks_;
   std::vector<std::unique_ptr<BaseLayer<DataType>>> network_;

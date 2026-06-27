@@ -85,6 +85,7 @@ class SelfPlayGame {
 
   // Number of ply used from the given opening.
   int GetStartPly() const { return start_ply_; }
+  bool IsTerminalStart() const { return terminal_start_; }
 
   // Writes training data to a file.
   void WriteTrainingData(TrainingDataWriter* writer) const;
@@ -108,6 +109,7 @@ class SelfPlayGame {
   std::shared_ptr<classic::NodeTree> tree_[2];
   std::string orig_fen_;
   int start_ply_;
+  bool terminal_start_ = false;
 
   // Search that is currently in progress. Stored in members so that Abort()
   // can stop it.
@@ -119,6 +121,12 @@ class SelfPlayGame {
   bool soft_adjudicated_ = false;
   float soft_result_q_ = 0.0f;  // From white's perspective.
   float soft_result_d_ = 1.0f;
+  // Per-game Bernoulli decision (against --soft-adjudicate-rate) whether this
+  // game soft-adjudicates when both abilities are exhausted. Decided lazily on
+  // the first ply where both abilities are spent, then cached so the rest of
+  // this game sees the same answer.
+  bool soft_adjudicate_decided_ = false;
+  bool soft_adjudicate_this_game_ = false;
   // Track minimum eval for each player so that GetWorstEvalForWinnerOrDraw()
   // can be calculated after end of game.
   float min_eval_[2] = {1.0f, 1.0f};

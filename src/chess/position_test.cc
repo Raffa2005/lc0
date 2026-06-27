@@ -22,9 +22,52 @@
 
 #include <iostream>
 
+#include "chess/gamestate.h"
+#include "chess/pgn.h"
 #include "utils/string.h"
 
 namespace lczero {
+
+TEST(GameState, ParsesDoubleMoveUciSequence) {
+  const auto state = MakeGameStateFromUci(
+      ChessBoard::kStartposFen, {"e2e4+", "g1f3", "e7e5"});
+
+  ASSERT_EQ(state.moves.size(), 3);
+  EXPECT_TRUE(state.moves[0].is_ability_activation());
+  EXPECT_FALSE(state.moves[1].is_ability_activation());
+  EXPECT_FALSE(state.moves[2].is_ability_activation());
+  EXPECT_FALSE(state.CurrentPosition().IsBlackToMove());
+  EXPECT_FALSE(state.CurrentPosition().IsMidDoublemove());
+  EXPECT_FALSE(state.CurrentPosition().OurDoublemoveAvailable());
+  EXPECT_TRUE(state.CurrentPosition().TheirDoublemoveAvailable());
+}
+
+TEST(GameState, PreservesMidDoubleMoveAtSequenceEnd) {
+  const auto state =
+      MakeGameStateFromUci(ChessBoard::kStartposFen, {"e2e4+"});
+
+  ASSERT_EQ(state.moves.size(), 1);
+  EXPECT_FALSE(state.CurrentPosition().IsBlackToMove());
+  EXPECT_TRUE(state.CurrentPosition().IsMidDoublemove());
+}
+
+TEST(UciOpeningSchedule, ParsesColorAndDoubleMove) {
+  const auto opening = ParseUciOpeningScheduleLine(
+      "dm-001\tblack\te2e4+ g1f3 e7e5", 7);
+
+  ASSERT_TRUE(opening.id);
+  EXPECT_EQ(*opening.id, "dm-001");
+  ASSERT_TRUE(opening.player1_black);
+  EXPECT_TRUE(*opening.player1_black);
+  ASSERT_TRUE(opening.uci_moves);
+  EXPECT_EQ(*opening.uci_moves,
+            (std::vector<std::string>{"e2e4+", "g1f3", "e7e5"}));
+}
+
+TEST(UciOpeningSchedule, RejectsMidDoubleEndpoint) {
+  EXPECT_THROW(
+      ParseUciOpeningScheduleLine("dm-002\twhite\te2e4+", 2), Exception);
+}
 
 TEST(Position, SetFenGetFen) {
   std::vector<Position> positions;

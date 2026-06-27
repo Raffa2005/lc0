@@ -313,7 +313,17 @@ InputPlanes EncodePositionForNN(
 
     // If en passant flag is set, undo last pawn move by removing the pawn from
     // the new square and putting into pre-move square.
-    if (history_idx < 0 && !board.en_passant().empty()) {
+    //
+    // For `repeat_current` we apply this on every history slot past the
+    // current one.  Without it, slots i=1..N copy the current board verbatim,
+    // erasing the i=0-vs-i=1 pawn-position delta that BT3 (and any history-
+    // consuming network) uses to perceive en passant.  The reconstructed
+    // pre-push position is fully determined by the e.p. file, so this is a
+    // lossless replacement of "the previous board" for the network's input.
+    const bool reconstruct_ep =
+        !board.en_passant().empty() &&
+        (repeat_current ? (i > 0) : (history_idx < 0));
+    if (reconstruct_ep) {
       const auto idx = GetLowestBit(board.en_passant().as_int());
       if (idx < 8) {  // "Us" board
         result[base + 0].mask +=

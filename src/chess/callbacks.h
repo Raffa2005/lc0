@@ -115,6 +115,10 @@ struct GameInfo {
   int play_start_ply;
   // Index of the game in the tournament (0-based).
   int game_id = -1;
+  // Stable identifier supplied by a scheduled opening.
+  std::optional<std::string> opening_id;
+  // Whether the scheduled opening was already terminal.
+  bool opening_terminal = false;
   // The color of the player1, if known.
   std::optional<bool> is_black;
   // Minimum resign threshold which would have resulted in a false positive

@@ -77,6 +77,7 @@ class SelfPlayTournament {
   Mutex mutex_;
   // Whether first game will be black for player1.
   bool first_game_black_ GUARDED_BY(mutex_) = false;
+  bool scheduled_openings_ = false;
   std::unique_ptr<SyzygyTablebase> syzygy_tb_ GUARDED_BY(mutex_);
   std::vector<Opening> discard_pile_ GUARDED_BY(mutex_);
   // Number of games which already started.

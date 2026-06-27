@@ -569,6 +569,84 @@ TEST(EncodePositionForNN, RepeatCurrentIgnoresRealHistory) {
   EXPECT_TRUE(slot_one_differs);
 }
 
+TEST(EncodePositionForNN, RepeatCurrentReconstructsEnPassant) {
+  // Networks perceive en passant via the i=0-vs-i=1 history delta (the
+  // pushing pawn was on rank 2/7 one ply ago, now on rank 4/5).  Under the
+  // old `repeat_current` semantics every history slot copied the current
+  // board, erasing that delta and making the network blind to e.p.
+  //
+  // Set up a real attackable e.p. position via FEN+move: black pawn on c4,
+  // then white plays b2b4 — this is the canonical user-reported case.
+  // After the move, side-to-move is black, the e.p. flag is set on b3, and
+  // black's c4 pawn can take b3 en passant.
+  ChessBoard board;
+  PositionHistory history;
+  board.SetFromFen("4k3/8/8/8/2p5/8/1P6/4K3 w - - 0 1");
+  history.Reset(board, 0, 1);
+  history.Append(history.Last().GetBoard().ParseMove("b2b4"));
+  // Sanity: the engine should have set the e.p. flag (because c4 attacks b3).
+  ASSERT_FALSE(history.Last().GetBoard().en_passant().empty())
+      << "test setup is broken: no e.p. attacker present";
+
+  InputPlanes repeated =
+      EncodePositionForNN(pblczero::NetworkFormat::INPUT_CLASSICAL_112_PLANE,
+                          history, 8, FillEmptyHistory::REPEAT_CURRENT,
+                          nullptr);
+
+  // Verify slot 1+ shows the pushing pawn ghosted back to its pre-push
+  // square.  We check both "ours" (plane 0) and "theirs" (plane 6) pawn
+  // planes, because lc0 mirrors the e.p. flag to whichever side ends up
+  // representing the pusher in side-to-move POV.
+  const uint64_t cur_ours = repeated[0].mask;
+  const uint64_t cur_theirs = repeated[6].mask;
+  for (int slot = 1; slot < 8; ++slot) {
+    const uint64_t slot_ours = repeated[slot * kPlanesPerBoard + 0].mask;
+    const uint64_t slot_theirs = repeated[slot * kPlanesPerBoard + 6].mask;
+    SCOPED_TRACE("slot=" + std::to_string(slot));
+    EXPECT_TRUE(slot_ours != cur_ours || slot_theirs != cur_theirs)
+        << "expected reconstructed pre-push pawn position in slot " << slot
+        << " (slot 0 ours=0x" << std::hex << cur_ours << " theirs=0x"
+        << cur_theirs << ", slot " << std::dec << slot << " ours=0x"
+        << std::hex << slot_ours << " theirs=0x" << slot_theirs << std::dec
+        << ")";
+  }
+
+  // All reconstructed slots agree with each other (slot 1 == slot 7 etc.).
+  for (int slot = 2; slot < 8; ++slot) {
+    SCOPED_TRACE("slot=" + std::to_string(slot));
+    for (int plane = 0; plane < kPlanesPerBoard; ++plane) {
+      EXPECT_EQ(repeated[slot * kPlanesPerBoard + plane].mask,
+                repeated[kPlanesPerBoard + plane].mask);
+    }
+  }
+
+  // Cross-check: when the position is loaded purely from FEN with no real
+  // history, `fen_only` already invokes the same ghost-pawn trick on every
+  // i>0 slot, so repeat_current must produce identical planes in that case.
+  ChessBoard fen_board;
+  fen_board.SetFromFen("4k3/8/8/8/1Pp5/8/8/4K3 b - b3 0 1");
+  PositionHistory fen_history;
+  fen_history.Reset(fen_board, 0, 1);
+  ASSERT_FALSE(fen_history.Last().GetBoard().en_passant().empty())
+      << "FEN setup is broken: no e.p. flag";
+
+  InputPlanes fen_repeat =
+      EncodePositionForNN(pblczero::NetworkFormat::INPUT_CLASSICAL_112_PLANE,
+                          fen_history, 8, FillEmptyHistory::REPEAT_CURRENT,
+                          nullptr);
+  InputPlanes fen_only =
+      EncodePositionForNN(pblczero::NetworkFormat::INPUT_CLASSICAL_112_PLANE,
+                          fen_history, 8, FillEmptyHistory::FEN_ONLY, nullptr);
+  for (int slot = 0; slot < 8; ++slot) {
+    for (int plane = 0; plane < kPlanesPerBoard; ++plane) {
+      SCOPED_TRACE("slot=" + std::to_string(slot) +
+                   " plane=" + std::to_string(plane));
+      EXPECT_EQ(fen_repeat[slot * kPlanesPerBoard + plane].mask,
+                fen_only[slot * kPlanesPerBoard + plane].mask);
+    }
+  }
+}
+
 }  // namespace lczero
 
 int main(int argc, char** argv) {

@@ -32,6 +32,23 @@
 
 namespace lczero {
 
+GameState MakeGameStateFromUci(const std::string& fen,
+                               const std::vector<std::string>& moves) {
+  GameState state;
+  state.startpos = Position::FromFen(fen);
+  ChessBoard cur_board = state.startpos.GetBoard();
+  state.moves.reserve(moves.size());
+  for (const auto& move : moves) {
+    Move m = cur_board.ParseMove(move);
+    state.moves.push_back(m);
+    cur_board.ApplyMove(m);
+    if (!m.is_ability_activation()) {
+      cur_board.Mirror();
+    }
+  }
+  return state;
+}
+
 Position GameState::CurrentPosition() const {
   return std::accumulate(
       moves.begin(), moves.end(), startpos,
