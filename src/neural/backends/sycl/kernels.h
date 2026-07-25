@@ -65,6 +65,11 @@ void convertNCHWtoNHWC(DstType* output_tensor, const SrcType* input_tensor,
 template <typename DstType, typename SrcType>
 void copyTypeConverted(DstType* op, SrcType* ip, int N, sycl::queue &sycl_queue);
 
+template <typename DstType, typename SrcType>
+void copyTypeConvertedStrided(DstType* output, const SrcType* input,
+                              int batches, int count, int output_stride,
+                              int input_stride, sycl::queue& sycl_queue);
+
 // Perform batch normilization.
 template <typename T>
 void batchNorm(T* output, const T* input, const T* skipInput, int N, int C,
@@ -85,6 +90,10 @@ void expandPlanes_Fp16_NCHW(sycl::half* output, const uint64_t* masks,
 template <typename T>
 void globalAvgPool(int N, int C, T* output, const T* input,
                    const T* prevLayerBias, bool nhwc, sycl::queue &sycl_queue);
+
+template <typename T>
+void globalAvgPoolNHWCToFloat(int N, int C, float* output, const T* input,
+                              sycl::queue& sycl_queue);
 
 // Perform global scale.
 template <typename T>

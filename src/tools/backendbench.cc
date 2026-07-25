@@ -27,6 +27,8 @@
 
 #include "tools/backendbench.h"
 
+#include <fstream>
+
 #include "chess/board.h"
 #include "neural/register.h"
 #include "neural/shared_params.h"
@@ -50,6 +52,9 @@ const OptionId kBatchStepId{"batch-step", "",
 const OptionId kHeaderOnlyOnceId{"header-only-once", "",
                                  "Print CSV header only once."};
 const OptionId kFenId{"fen", "", "Benchmark initial position FEN."};
+const OptionId kFenFileId{
+    "fen-file", "",
+    "Read benchmark positions from a file containing one FEN per line."};
 
 const OptionId kClippyId{"clippy", "", "Enable helpful assistant."};
 
@@ -88,6 +93,7 @@ void BackendBenchmark::Run() {
   options.Add<IntOption>(kBatchStepId, 1, 256) = 1;
   options.Add<BoolOption>(kHeaderOnlyOnceId) = false;
   options.Add<StringOption>(kFenId) = ChessBoard::kStartposFen;
+  options.Add<StringOption>(kFenFileId) = "";
   options.Add<BoolOption>(kClippyId) = false;
 
   if (!options.ProcessAllFlags()) return;
@@ -98,9 +104,36 @@ void BackendBenchmark::Run() {
     auto backend = BackendManager::Get()->CreateFromParams(option_dict);
     const int threads = option_dict.Get<int>(kThreadsOptionId);
 
-    classic::NodeTree tree;
-    tree.ResetToPosition(option_dict.Get<std::string>(kFenId), {});
-    EvalPosition pos{tree.GetPositionHistory().GetPositions(), {}};
+    std::vector<std::unique_ptr<classic::NodeTree>> trees;
+    std::vector<EvalPosition> positions;
+    auto add_position = [&](const std::string& fen) {
+      auto tree = std::make_unique<classic::NodeTree>();
+      tree->ResetToPosition(fen, {});
+      positions.emplace_back(
+          EvalPosition{tree->GetPositionHistory().GetPositions(), {}});
+      trees.emplace_back(std::move(tree));
+    };
+
+    const auto fen_file = option_dict.Get<std::string>(kFenFileId);
+    if (fen_file.empty()) {
+      add_position(option_dict.Get<std::string>(kFenId));
+    } else {
+      std::ifstream input(fen_file);
+      if (!input) {
+        throw Exception("Cannot open benchmark FEN file: " + fen_file);
+      }
+      std::string fen;
+      while (std::getline(input, fen)) {
+        if (!fen.empty() && fen.back() == '\r') fen.pop_back();
+        if (!fen.empty()) add_position(fen);
+      }
+      if (positions.empty()) {
+        throw Exception("Benchmark FEN file contains no positions: " +
+                        fen_file);
+      }
+      CERR << "Loaded " << positions.size() << " benchmark positions from "
+           << fen_file << ".";
+    }
     std::vector<std::thread> handles;
 
     // Do any backend initialization outside the loop.
@@ -109,7 +142,10 @@ void BackendBenchmark::Run() {
       for (int i = 0; i < 2; i++) {
         auto warmup = backend->CreateComputation();
         for (int j = 0; j < option_dict.Get<int>(kMaxBatchSizeId); ++j) {
-          warmup->AddInput(pos, {});
+          warmup->AddInput(
+              positions[(i * option_dict.Get<int>(kMaxBatchSizeId) + j) %
+                        positions.size()],
+              {});
         }
         warmup->ComputeBlocking();
       }
@@ -149,11 +185,12 @@ void BackendBenchmark::Run() {
         int count = 0;
         auto& end = ends[tid];
         // Ignore the first batch to let GPU queue fill for stable measurements.
-        while (j++ < batches) {
-          // Put i copies of tree root node into computation and compute.
+        int batch;
+        while ((batch = j++) < batches) {
           auto computation = backend->CreateComputation();
           for (int k = 0; k < i; k++) {
-            computation->AddInput(pos, {});
+            computation->AddInput(positions[(batch * i + k) % positions.size()],
+                                  {});
           }
           computation->ComputeBlocking();
           end[count++] = std::chrono::steady_clock::now();

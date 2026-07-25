@@ -27,19 +27,28 @@ namespace lczero {
 namespace sycldnn_backend {
 
 struct InputsOutputs {
-  InputsOutputs(int maxBatchSize, bool wdl, bool moves_left, sycl::queue& m_ct1,
+  InputsOutputs(int maxBatchSize, int num_input_planes, bool wdl,
+                bool moves_left, int gate_hidden_size, sycl::queue& m_ct1,
                 size_t tensor_mem_size = 0, size_t scratch_size = 0,
-                bool cublasDisableTensorCores = false): q_ct1(m_ct1) {
-  #ifdef USE_CUBLAS
+                bool cublasDisableTensorCores = false)
+      : q_ct1(m_ct1) {
+#ifdef USE_CUBLAS
     cublasHandle_t h= cuBlasContextManager::getcuBlasHandle_t();
-  #endif                
-    input_masks_mem_shared_ = malloc_host<uint64_t>(maxBatchSize * kInputPlanes, q_ct1);
-    input_val_mem_shared_ = malloc_host<float>(maxBatchSize * kInputPlanes, q_ct1);
+  #endif
+    input_masks_mem_shared_ =
+        malloc_host<uint64_t>(maxBatchSize * num_input_planes, q_ct1);
+    input_val_mem_shared_ =
+        malloc_host<float>(maxBatchSize * num_input_planes, q_ct1);
     // Seperate device memory copy for policy output.
     // It's faster to write to device memory and then copy to host memory
     // than having the kernel write directly to it.
     op_policy_mem_ = malloc_host<float>(maxBatchSize * kNumOutputPolicy, q_ct1);
     op_policy_mem_gpu_ = malloc_device<float>(maxBatchSize * kNumOutputPolicy, q_ct1);
+    if (gate_hidden_size > 0) {
+      op_gate_mem_ = malloc_host<float>(maxBatchSize * gate_hidden_size, q_ct1);
+      op_gate_mem_gpu_ =
+          malloc_device<float>(maxBatchSize * gate_hidden_size, q_ct1);
+    }
     op_value_mem_shared_ = malloc_host<float>(maxBatchSize * (wdl ? 3 : 1), q_ct1);
 
     if (moves_left) {
@@ -58,7 +67,6 @@ struct InputsOutputs {
       multi_stream_ = false;
     }
   }
-
 
   ~InputsOutputs() {
     /*
@@ -89,6 +97,7 @@ struct InputsOutputs {
   float* input_val_mem_shared_;
   float* op_value_mem_shared_;
   float* op_moves_left_mem_shared_ = nullptr;
+  float* op_gate_mem_ = nullptr;
 
   // GPU pointers for the above allocations.
   //uint64_t* input_masks_mem_gpu_;
@@ -98,6 +107,7 @@ struct InputsOutputs {
 
   // This is a seperate copy.
   float* op_policy_mem_gpu_;
+  float* op_gate_mem_gpu_ = nullptr;
   float* op_policy_mem_;
 
   // memory needed to run the network owned by InputsOutputs when multi_stream

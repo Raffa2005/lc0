@@ -507,6 +507,21 @@ void copyTypeConverted(DstType* op, SrcType* ip, int N, sycl::queue &sycl_queue)
                        });
 }
 
+template <typename DstType, typename SrcType>
+void copyTypeConvertedStrided(DstType* output, const SrcType* input,
+                              int batches, int count, int output_stride,
+                              int input_stride, sycl::queue& sycl_queue) {
+  const int size = batches * count;
+  if (size <= 0) return;
+  sycl_queue.parallel_for(sycl::range<1>(size), [=](sycl::id<1> item) {
+    const int index = item[0];
+    const int batch = index / count;
+    const int element = index % count;
+    output[batch * output_stride + element] =
+        static_cast<DstType>(input[batch * input_stride + element]);
+  });
+}
+
 template <typename T>
 void batchNorm_kernel(T* output, const T* input, const T* skipInput,
                                  int N, int C, int H, int W, const float* means,
@@ -555,80 +570,41 @@ void batchNorm(T* output, const T* input, const T* skipInput, int N, int C,
       });
 }
 
-void expandPlanes_kernel_Fp32_NCHW(float* output,
-                                              const uint64_t* masks,
-                                              const float* values, int n,
-                                              const sycl::nd_item<3> &item_ct1,
-                                              uint64_t *shMasks, float *shVals) {
-  // Block size of 256, same mask/val for 64 consecutive threads.
-  constexpr int kNumShmemElements = 256 / 64;
+template <typename T>
+void expandPlanes_kernel_NCHW(T* output, const uint64_t* masks,
+                              const float* values, int n,
+                              const sycl::nd_item<1>& item) {
+  const int index = static_cast<int>(item.get_global_linear_id()) * 2;
+  const int plane_index = index >> 6;
+  if (plane_index >= n) return;
 
-  int index = item_ct1.get_local_id(2) +
-              item_ct1.get_local_range(2) * item_ct1.get_group(2);
+  const uint64_t mask = masks[plane_index];
+  const float value = values[plane_index];
+  const int square = index & 0x3f;
+  output[index] =
+      (mask & (1ull << square)) ? static_cast<T>(value) : static_cast<T>(0);
+  output[index + 1] = (mask & (1ull << (square + 1))) ? static_cast<T>(value)
+                                                      : static_cast<T>(0);
+}
 
-  int planeIndex = index >> 6;
-
-  if (planeIndex >= n) return;
-
-  // Load inputs to shared memory.
-  if (item_ct1.get_local_id(2) < kNumShmemElements) {
-    shMasks[item_ct1.get_local_id(2)] =
-        masks[planeIndex + item_ct1.get_local_id(2)];
-    shVals[item_ct1.get_local_id(2)] =
-        values[planeIndex + item_ct1.get_local_id(2)];
-  }
-  /*
-  DPCT1113:53: Consider replacing
-  sycl::nd_item::barrier(sycl::access::fence_space::local_space) with
-  sycl::nd_item::barrier() if function "expandPlanes_kernel_Fp32_NCHW" is called
-  in a multidimensional kernel.
-  */
-  item_ct1.barrier(sycl::access::fence_space::local_space);
-
-  uint64_t mask = shMasks[item_ct1.get_local_id(2) >> 6];
-
-  int sqIndex = index & 0x3F;
-  float op = 0;
-
-  bool set = !!(mask & (1ull << sqIndex));
-  if (set) {
-    op = shVals[item_ct1.get_local_id(2) >> 6];
-  }
-  output[index] = op;
+template <typename T>
+void expandPlanes_NCHW(T* output, const uint64_t* masks, const float* values,
+                       int n, sycl::queue& sycl_queue) {
+  constexpr int kBlockSize = 256;
+  const int threads = n * 64 / 2;
+  const int blocks = DivUp(threads, kBlockSize);
+  sycl_queue.parallel_for(sycl::nd_range<1>(sycl::range<1>(blocks * kBlockSize),
+                                            sycl::range<1>(kBlockSize)),
+                          [=](sycl::nd_item<1> item) {
+                            expandPlanes_kernel_NCHW(output, masks, values, n,
+                                                     item);
+                          });
 }
 
 void expandPlanes_Fp32_NCHW(float* output, const uint64_t* masks,
-                            const float* values, int n, sycl::queue &sycl_queue) {
-  int threads = n * 8 * 8;  // Each thread writes a single element.
-  const int blockSize = 256;
-  int blocks = DivUp(threads, blockSize);
-  
-  sycl_queue.submit([&](sycl::handler& cgh) {
-    /*
-    DPCT1101:115: 'kNumShmemElements' expression was replaced with a value.
-    Modify the code to use the original expression, provided in comments, if
-    it is correct.
-    */
-    sycl::local_accessor<uint64_t, 1> shMasks_acc_ct1(
-        sycl::range<1>(4 /*kNumShmemElements*/), cgh);
-    /*
-    DPCT1101:116: 'kNumShmemElements' expression was replaced with a value.
-    Modify the code to use the original expression, provided in comments, if
-    it is correct.
-    */
-    sycl::local_accessor<float, 1> shVals_acc_ct1(
-        sycl::range<1>(4 /*kNumShmemElements*/), cgh);
-
-    cgh.parallel_for(
-        sycl::nd_range<3>(
-            sycl::range<3>(1, 1, blocks) * sycl::range<3>(1, 1, blockSize),
-            sycl::range<3>(1, 1, blockSize)),
-        [=](sycl::nd_item<3> item_ct1) {
-          expandPlanes_kernel_Fp32_NCHW(output, masks, values, n, item_ct1,
-                                        shMasks_acc_ct1.get_pointer(),
-                                        shVals_acc_ct1.get_pointer());
-        });
-  });
+                            const float* values, int n,
+                            sycl::queue& sycl_queue) {
+  expandPlanes_NCHW(output, masks, values, n, sycl_queue);
 }
 
 // TODO: Can optimize using shared memory if this becomes a bottleneck.
@@ -671,81 +647,10 @@ void expandPlanes_Fp16_NHWC(sycl::half* output, const uint64_t* masks,
   }
 }
 
-void expandPlanes_kernel_Fp16_NCHW(sycl::half* output, const uint64_t* masks,
-                                   const float* values, int n,
-                                   const sycl::nd_item<3>& item_ct1,
-                                   uint64_t* shMasks, sycl::half* shVals) {
-  // block size of 256, same mask/val for 64 consecutive threads
-  constexpr int kNumShmemElements = 256 / 64;
-
-  int index = item_ct1.get_local_id(2) +
-              item_ct1.get_local_range(2) * item_ct1.get_group(2);
-
-  int planeIndex = index >> 6;
-
-  if (planeIndex >= n) return;
-
-  // load inputs to shared memory
-  if (item_ct1.get_local_id(2) < kNumShmemElements) {
-    shMasks[item_ct1.get_local_id(2)] =
-        masks[planeIndex + item_ct1.get_local_id(2)];
-    shVals[item_ct1.get_local_id(2)] =
-        values[planeIndex + item_ct1.get_local_id(2)];
-  }
-  /*
-  DPCT1113:56: Consider replacing
-  sycl::nd_item::barrier(sycl::access::fence_space::local_space) with
-  sycl::nd_item::barrier() if function "expandPlanes_kernel_Fp16_NCHW" is called
-  in a multidimensional kernel.
-  */
-  item_ct1.barrier(sycl::access::fence_space::local_space);
-
-  uint64_t mask = shMasks[item_ct1.get_local_id(2) >> 6];
-
-  int sqIndex = index & 0x3F;
-  sycl::half op = 0;
-
-  bool set = !!(mask & (1ull << sqIndex));
-  if (set) {
-    op = (sycl::half)shVals[item_ct1.get_local_id(2) >> 6];
-  }
-  output[index] = op;
-}
-
 void expandPlanes_Fp16_NCHW(sycl::half* output, const uint64_t* masks,
-                            const float* values, int n, sycl::queue &sycl_queue) {
-  int threads = n * 8 * 8;  // each thread writes a single element
-  const int blockSize = 256;
-  int blocks = DivUp(threads, blockSize);
-  {
-    
-    sycl_queue.submit([&](sycl::handler& cgh) {
-      /*
-      DPCT1101:117: 'kNumShmemElements' expression was replaced with a value.
-      Modify the code to use the original expression, provided in comments, if
-      it is correct.
-      */
-      sycl::local_accessor<uint64_t, 1> shMasks_acc_ct1(
-          sycl::range<1>(4 /*kNumShmemElements*/), cgh);
-      /*
-      DPCT1101:118: 'kNumShmemElements' expression was replaced with a value.
-      Modify the code to use the original expression, provided in comments, if
-      it is correct.
-      */
-      sycl::local_accessor<sycl::half, 1> shVals_acc_ct1(
-          sycl::range<1>(4 /*kNumShmemElements*/), cgh);
-
-      cgh.parallel_for(
-          sycl::nd_range<3>(
-              sycl::range<3>(1, 1, blocks) * sycl::range<3>(1, 1, blockSize),
-              sycl::range<3>(1, 1, blockSize)),
-          [=](sycl::nd_item<3> item_ct1) {
-            expandPlanes_kernel_Fp16_NCHW(output, masks, values, n, item_ct1,
-                                          shMasks_acc_ct1.get_pointer(),
-                                          shVals_acc_ct1.get_pointer());
-          });
-    });
-  }
+                            const float* values, int n,
+                            sycl::queue& sycl_queue) {
+  expandPlanes_NCHW(output, masks, values, n, sycl_queue);
 }
 
 template <typename T>
@@ -940,6 +845,23 @@ void globalAvgPool(int N, int C, T* output, const T* input,
                                N * C, C, item_ct1);
         });
   }
+}
+
+template <typename T>
+void globalAvgPoolNHWCToFloat(int N, int C, float* output, const T* input,
+                              sycl::queue& sycl_queue) {
+  const int size = N * C;
+  if (size <= 0) return;
+  sycl_queue.parallel_for(sycl::range<1>(size), [=](sycl::id<1> item) {
+    const int index = item[0];
+    const int batch = index / C;
+    const int channel = index % C;
+    float sum = 0.0f;
+    for (int square = 0; square < 64; ++square) {
+      sum += static_cast<float>(input[(batch * 64 + square) * C + channel]);
+    }
+    output[index] = sum / 64.0f;
+  });
 }
 
 template <typename T>
@@ -1756,6 +1678,13 @@ template void copyTypeConverted<float, sycl::half>(float* op, sycl::half* ip, in
 template void copyTypeConverted<float, float>(float* op, float* ip, int N, sycl::queue &sycl_queue);
 template void copyTypeConverted<sycl::half, sycl::half>(sycl::half* op, sycl::half* ip, int N, sycl::queue &sycl_queue);
 
+template void copyTypeConvertedStrided<float, sycl::half>(
+    float* output, const sycl::half* input, int batches, int count,
+    int output_stride, int input_stride, sycl::queue& sycl_queue);
+template void copyTypeConvertedStrided<float, float>(
+    float* output, const float* input, int batches, int count,
+    int output_stride, int input_stride, sycl::queue& sycl_queue);
+
 template void batchNorm<float>(float* output, const float* input,
                                const float* skipInput, int N, int C, int H,
                                int W, float* means, float* var_multipliers,
@@ -1803,6 +1732,13 @@ template void globalAvgPool<float>(int N, int C, float* output,
 
 template void globalAvgPool<sycl::half>(int N, int C, sycl::half* output, const sycl::half* input,
                                   const sycl::half* prevLayerBias, bool nhwc, sycl::queue &sycl_queue);
+
+template void globalAvgPoolNHWCToFloat<float>(int N, int C, float* output,
+                                              const float* input,
+                                              sycl::queue& sycl_queue);
+template void globalAvgPoolNHWCToFloat<sycl::half>(int N, int C, float* output,
+                                                   const sycl::half* input,
+                                                   sycl::queue& sycl_queue);
 
 template void globalScale<float>(int N, int C, float* output,
                                  const float* input, const float* scaleBias,

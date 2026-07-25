@@ -125,16 +125,18 @@ class SyclNetworkComputation : public NetworkComputation {
   ~SyclNetworkComputation();
 
   void AddInput(InputPlanes&& input) override {
+    const int num_input_planes = network_->GetNumInputPlanes();
     const auto iter_mask =
-        &inputs_outputs_->input_masks_mem_shared_[batch_size_ * kInputPlanes];
+        &inputs_outputs_
+             ->input_masks_mem_shared_[batch_size_ * num_input_planes];
     const auto iter_val =
-        &inputs_outputs_->input_val_mem_shared_[batch_size_ * kInputPlanes];
+        &inputs_outputs_->input_val_mem_shared_[batch_size_ * num_input_planes];
 
-    int i = 0;
-    for (const auto& plane : input) {
+    assert(static_cast<int>(input.size()) >= num_input_planes);
+    for (int i = 0; i < num_input_planes; ++i) {
+      const auto& plane = input[i];
       iter_mask[i] = plane.mask;
       iter_val[i] = plane.value;
-      i++;
     }
 
     batch_size_++;
@@ -269,7 +271,6 @@ class SyclNetwork : public Network {
       CERR << "Using Fp32 ";
     }
 
-    const int kNumInputPlanes = kInputPlanes;
     const int kNumFilters = (int)weights.input.biases.size();
     numBlocks_ = (int)weights.residual.size();
     numFilters_ = kNumFilters;
@@ -278,6 +279,43 @@ class SyclNetwork : public Network {
     if (attn_body_) {
       assert(weights.ip_emb_b.size() > 0);
     }
+
+    if (numBlocks_ > 0) {
+      const size_t denominator = static_cast<size_t>(kNumFilters) * 9;
+      if (denominator == 0 || weights.input.weights.size() % denominator != 0) {
+        throw Exception("Cannot determine the SYCL network input-plane count.");
+      }
+      num_input_planes_ =
+          static_cast<int>(weights.input.weights.size() / denominator);
+    } else if (attn_body_) {
+      const int d_model = static_cast<int>(weights.ip_emb_b.size());
+      if (d_model <= 0 || weights.ip_emb_w.size() % d_model != 0) {
+        throw Exception(
+            "Cannot determine the SYCL attention input-plane count.");
+      }
+      const int embedding_inputs =
+          static_cast<int>(weights.ip_emb_w.size() / d_model);
+      const bool is_pe_dense =
+          static_cast<InputEmbedding>(nf.input_embedding()) ==
+          InputEmbedding::INPUT_EMBEDDING_PE_DENSE;
+      if (is_pe_dense) {
+        if (weights.ip_emb_preproc_b.size() % 64 != 0) {
+          throw Exception("Invalid dense positional-embedding dimensions.");
+        }
+        num_input_planes_ =
+            embedding_inputs -
+            static_cast<int>(weights.ip_emb_preproc_b.size() / 64);
+      } else {
+        num_input_planes_ = embedding_inputs - kNumPosEncodingChannels;
+      }
+    } else {
+      num_input_planes_ = kInputPlanes;
+    }
+    if (num_input_planes_ <= 0 || num_input_planes_ > kInputPlanes) {
+      throw Exception("Unsupported SYCL network input-plane count: " +
+                      std::to_string(num_input_planes_));
+    }
+    const int kNumInputPlanes = num_input_planes_;
 
     // Warn if the memory required for storing transformed weights is
     // going to exceed 40% of total video memory, force custom_winograd off
@@ -463,7 +501,7 @@ class SyclNetwork : public Network {
 
       auto attention_body = std::make_unique<AttentionBody<DataType>>(
           weights, scratch_mem_, activations, numBlocks_,
-          numBlocks_ > 0 ? kNumFilters : kInputPlanes, max_batch_size_,
+          numBlocks_ > 0 ? kNumFilters : num_input_planes_, max_batch_size_,
           static_cast<InputEmbedding>(
               file.format().network_format().input_embedding()) ==
               InputEmbedding::INPUT_EMBEDDING_PE_DENSE,
@@ -476,16 +514,73 @@ class SyclNetwork : public Network {
     // Policy head.
     {
       MultiHeadWeights::PolicyHead& head = weights.policy_heads.at(policy_head);
+      doubled_policy_ = !head.ip2_pol_ab_w.empty();
+      gate_hidden_size_ = static_cast<int>(head.ip_pol_gate_b.size());
+      const bool has_gate_weights =
+          !head.ip_pol_gate_w.empty() || !head.ip_pol_gate_b.empty() ||
+          !head.ip2_pol_gate_w.empty() || !head.ip2_pol_gate_b.empty();
+      if ((doubled_policy_ || has_gate_weights) && !attn_policy_) {
+        throw Exception(
+            "The doubled policy and burn gate require an attention policy.");
+      }
+      if (has_gate_weights && !attn_body_) {
+        throw Exception(
+            "The SYCL burn gate currently requires an attention body.");
+      }
+      if (has_gate_weights) {
+        const size_t policy_embedding_size = head.ip_pol_b.size();
+        if (!doubled_policy_ || gate_hidden_size_ <= 0 ||
+            head.ip_pol_gate_w.size() !=
+                policy_embedding_size * gate_hidden_size_ ||
+            head.ip2_pol_gate_w.size() !=
+                static_cast<size_t>(gate_hidden_size_) ||
+            head.ip2_pol_gate_b.size() != 1) {
+          throw Exception("Invalid learned burn-gate dimensions.");
+        }
+        gate_dense1_w_ = head.ip2_pol_gate_w;
+        gate_dense1_b_ = head.ip2_pol_gate_b[0];
+      }
       if (attn_policy_) {
+        BaseLayer<DataType>* policy_input =
+            attn_body_ ? encoder_last_ : resi_last_;
         auto AttentionPolicy = std::make_unique<AttentionPolicyHead<DataType>>(
-            getLastLayer(), head, scratch_mem_, attn_body_, act,
-            max_batch_size_, *sycl_queue_);
+            policy_input, head, scratch_mem_, attn_body_, act, max_batch_size_,
+            *sycl_queue_);
         network_.emplace_back(std::move(AttentionPolicy));
 
         auto policymap = std::make_unique<PolicyMapLayer<DataType>>(
             getLastLayer(), kNumOutputPolicy, 1, 1, 64 * 64 + 8 * 24, true, *sycl_queue_);
         policymap->LoadWeights(kAttnPolicyMap, scratch_mem_);
         network_.emplace_back(std::move(policymap));
+
+        if (doubled_policy_) {
+          auto ability_head = head;
+          ability_head.ip2_pol_w = head.ip2_pol_ab_w;
+          ability_head.ip2_pol_b = head.ip2_pol_ab_b;
+          ability_head.ip3_pol_w = head.ip3_pol_ab_w;
+          ability_head.ip3_pol_b = head.ip3_pol_ab_b;
+          ability_head.ip4_pol_w = head.ip4_pol_ab_w;
+
+          auto AbilityPolicy = std::make_unique<AttentionPolicyHead<DataType>>(
+              policy_input, ability_head, scratch_mem_, attn_body_, act,
+              max_batch_size_, *sycl_queue_);
+          network_.emplace_back(std::move(AbilityPolicy));
+
+          auto abilitymap = std::make_unique<PolicyMapLayer<DataType>>(
+              getLastLayer(), kNumOutputPolicy, 1, 1, 64 * 64 + 8 * 24, true,
+              *sycl_queue_);
+          abilitymap->LoadWeights(kAttnPolicyMap, scratch_mem_);
+          network_.emplace_back(std::move(abilitymap));
+        }
+
+        if (gate_hidden_size_ > 0) {
+          gate_policy_embed_layer_ = std::make_unique<EmbeddingLayer<DataType>>(
+              policy_input, head.ip_pol_w, head.ip_pol_b, scratch_mem_, act,
+              *sycl_queue_);
+          gate_embed_layer_ = std::make_unique<EmbeddingLayer<DataType>>(
+              gate_policy_embed_layer_.get(), head.ip_pol_gate_w,
+              head.ip_pol_gate_b, scratch_mem_, ACTIVATION_NONE, *sycl_queue_);
+        }
 
       } else {
         if (conv_policy_) {
@@ -581,11 +676,18 @@ class SyclNetwork : public Network {
     //      hold output and third to hold skip connection's input).
 
     // size of input to the network
-    size_t maxSize = max_batch_size_ * kNumInputPlanes * 64 * sizeof(DataType);
+    size_t maxSize =
+        max_batch_size_ * num_input_planes_ * 64 * sizeof(DataType);
 
     // take max size of all layers
     for (auto& layer : network_) {
       maxSize = std::max(maxSize, layer->GetOutputSize(max_batch_size_));
+    }
+    if (gate_policy_embed_layer_) {
+      maxSize = std::max(
+          maxSize, gate_policy_embed_layer_->GetOutputSize(max_batch_size_));
+      maxSize =
+          std::max(maxSize, gate_embed_layer_->GetOutputSize(max_batch_size_));
     }
 
     if ((attn_policy_ || use_res_block_winograd_fuse_opt_ || attn_body_) &&
@@ -653,11 +755,12 @@ class SyclNetwork : public Network {
     
     bool fp16 = std::is_same<sycl::half, DataType>::value;
     if (fp16) {
-      expandPlanes_Fp16_NCHW((sycl::half*)(tensor_mem[0]), ipDataMasks, ipDataValues,
-                             batchSize * kInputPlanes, io_sycl_queue_);
+      expandPlanes_Fp16_NCHW((sycl::half*)(tensor_mem[0]), ipDataMasks,
+                             ipDataValues, batchSize * num_input_planes_,
+                             io_sycl_queue_);
     } else {
       expandPlanes_Fp32_NCHW((float*)(tensor_mem[0]), ipDataMasks, ipDataValues,
-                             batchSize * kInputPlanes, io_sycl_queue_);
+                             batchSize * num_input_planes_, io_sycl_queue_);
     }
     
 
@@ -754,29 +857,58 @@ class SyclNetwork : public Network {
     }
 
     // Policy head.
-   
+    constexpr int kPolicyBranchSize = kNumOutputPolicy / 2;
     if (attn_policy_) {
-      
       network_[l++]->Eval(
           batchSize, spare1, flow, spare2, scratch_mem, scratch_size_, io_sycl_queue_,
           head_offset_pointers);  // Entire Attention policy head except for the
                                   // policy map
       if (fp16) {
         network_[l++]->Eval(batchSize, spare2, spare1, nullptr, scratch_mem,
-                            scratch_size_, io_sycl_queue_, nullptr);  // policy map layer
-
-
-        copyTypeConverted(opPol, (sycl::half*)spare2,
-                          batchSize * kNumOutputPolicy,
-                          io_sycl_queue_);  // POLICY output
+                            scratch_size_, io_sycl_queue_,
+                            nullptr);  // normal policy map
+        copyTypeConvertedStrided(opPol,
+                                 reinterpret_cast<const sycl::half*>(spare2),
+                                 batchSize, kPolicyBranchSize, kNumOutputPolicy,
+                                 kNumOutputPolicy, io_sycl_queue_);
       } else {
         network_[l++]->Eval(batchSize, (DataType*)opPol, spare1, nullptr,
-                            scratch_mem, scratch_size_, io_sycl_queue_, nullptr);  // policy map layer  // POLICY output
-        
+                            scratch_mem, scratch_size_, io_sycl_queue_,
+                            nullptr);  // normal policy map
       }
- 
-    } else if (conv_policy_) {
 
+      if (doubled_policy_) {
+        network_[l++]->Eval(batchSize, spare1, flow, spare2, scratch_mem,
+                            scratch_size_, io_sycl_queue_,
+                            head_offset_pointers);  // ability policy head
+        if (fp16) {
+          network_[l++]->Eval(batchSize, spare2, spare1, nullptr, scratch_mem,
+                              scratch_size_, io_sycl_queue_,
+                              nullptr);  // ability policy map
+          copyTypeConvertedStrided(opPol + kPolicyBranchSize,
+                                   reinterpret_cast<const sycl::half*>(spare2),
+                                   batchSize, kPolicyBranchSize,
+                                   kNumOutputPolicy, kNumOutputPolicy,
+                                   io_sycl_queue_);
+        } else {
+          network_[l++]->Eval(
+              batchSize, reinterpret_cast<DataType*>(opPol + kPolicyBranchSize),
+              spare1, nullptr, scratch_mem, scratch_size_, io_sycl_queue_,
+              nullptr);  // ability policy map
+        }
+      }
+
+      if (gate_embed_layer_) {
+        gate_policy_embed_layer_->Eval(batchSize, spare1, flow, nullptr,
+                                       scratch_mem, scratch_size_,
+                                       io_sycl_queue_, nullptr);
+        gate_embed_layer_->Eval(batchSize, spare2, spare1, nullptr, scratch_mem,
+                                scratch_size_, io_sycl_queue_, nullptr);
+        globalAvgPoolNHWCToFloat(batchSize, gate_hidden_size_,
+                                 io->op_gate_mem_gpu_, spare2, io_sycl_queue_);
+      }
+
+    } else if (conv_policy_) {
       network_[l++]->Eval(batchSize, spare1, flow, nullptr, scratch_mem,
                           scratch_size_, io_sycl_queue_, nullptr);  // policy conv1
 
@@ -787,11 +919,10 @@ class SyclNetwork : public Network {
         network_[l++]->Eval(batchSize, spare1, spare2, nullptr, scratch_mem,
                             scratch_size_, io_sycl_queue_, nullptr);  // policy map layer
 
-        copyTypeConverted(opPol, (sycl::half*)(spare1),
-                          batchSize * kNumOutputPolicy,
-                          io_sycl_queue_);  // POLICY output
-
-
+        copyTypeConvertedStrided(opPol,
+                                 reinterpret_cast<const sycl::half*>(spare1),
+                                 batchSize, kPolicyBranchSize, kNumOutputPolicy,
+                                 kNumOutputPolicy, io_sycl_queue_);
       } else {
         network_[l++]->Eval(batchSize, (DataType*)opPol, spare2, nullptr,
                             scratch_mem, scratch_size_, io_sycl_queue_, nullptr);  
@@ -799,23 +930,15 @@ class SyclNetwork : public Network {
       }
 
     } else {
-      
       network_[l++]->Eval(batchSize, spare1, flow, nullptr, scratch_mem,
                           scratch_size_, io_sycl_queue_, nullptr);  // pol conv
 
-      if (fp16) {
-        network_[l++]->Eval(batchSize, spare2, spare1, nullptr, scratch_mem,
-                            scratch_size_, io_sycl_queue_, nullptr);  // pol FC
-
-        copyTypeConverted(opPol, (sycl::half*)(spare2),
-                          batchSize * kNumOutputPolicy,
-                          io_sycl_queue_);  // POLICY
-      } else {
-        network_[l++]->Eval(batchSize, (DataType*)opPol, spare1, nullptr,
-                            scratch_mem, scratch_size_, io_sycl_queue_, nullptr);  // pol FC  // POLICY
-      }
+      network_[l++]->Eval(batchSize, spare2, spare1, nullptr, scratch_mem,
+                          scratch_size_, io_sycl_queue_, nullptr);  // pol FC
+      copyTypeConvertedStrided(opPol, static_cast<const DataType*>(spare2),
+                               batchSize, kPolicyBranchSize, kNumOutputPolicy,
+                               kPolicyBranchSize, io_sycl_queue_);
     }
-
 
     // value head
     if (fp16) {
@@ -856,9 +979,16 @@ class SyclNetwork : public Network {
 
       }
     }
-    
-    // Copy policy output from device memory to host memory.
-    auto event = io_sycl_queue_.memcpy(io->op_policy_mem_, io->op_policy_mem_gpu_, sizeof(float) * kNumOutputPolicy * batchSize);
+
+    // Copy policy and gate outputs from device memory to host memory.
+    auto event =
+        io_sycl_queue_.memcpy(io->op_policy_mem_, io->op_policy_mem_gpu_,
+                              sizeof(float) * kNumOutputPolicy * batchSize);
+    if (gate_hidden_size_ > 0) {
+      event =
+          io_sycl_queue_.memcpy(io->op_gate_mem_, io->op_gate_mem_gpu_,
+                                sizeof(float) * gate_hidden_size_ * batchSize);
+    }
 
     if (!multi_stream_) {
       //ReportCUDAErrors(
@@ -888,6 +1018,61 @@ class SyclNetwork : public Network {
         io->op_value_mem_shared_[3 * i + 2] = l;
       }
     }
+
+    if (gate_hidden_size_ > 0) {
+      constexpr float kSqrtTwoOverPi = 0.7978845608f;
+      std::vector<float> normal_logits(kPolicyBranchSize);
+      std::vector<float> ability_logits(kPolicyBranchSize);
+      std::vector<float> normal_probs(kPolicyBranchSize);
+      std::vector<float> ability_probs(kPolicyBranchSize);
+      for (int i = 0; i < batchSize; ++i) {
+        const auto* gate_hidden = io->op_gate_mem_ + i * gate_hidden_size_;
+        float gate_logit = gate_dense1_b_;
+        for (int j = 0; j < gate_hidden_size_; ++j) {
+          const float x = gate_hidden[j];
+          const float gelu =
+              0.5f * x *
+              (1.0f + std::tanh(kSqrtTwoOverPi * (x + 0.044715f * x * x * x)));
+          gate_logit += gate_dense1_w_[j] * gelu;
+        }
+        const float p_burn = 1.0f / (1.0f + std::exp(-gate_logit));
+
+        auto* policy = io->op_policy_mem_ + i * kNumOutputPolicy;
+        for (int j = 0; j < kPolicyBranchSize; ++j) {
+          normal_logits[j] = policy[j];
+          ability_logits[j] = policy[kPolicyBranchSize + j];
+        }
+
+        const float normal_max =
+            *std::max_element(normal_logits.begin(), normal_logits.end());
+        const float ability_max =
+            *std::max_element(ability_logits.begin(), ability_logits.end());
+        float normal_sum = 0.0f;
+        float ability_sum = 0.0f;
+        for (int j = 0; j < kPolicyBranchSize; ++j) {
+          normal_probs[j] = std::exp(normal_logits[j] - normal_max);
+          ability_probs[j] = std::exp(ability_logits[j] - ability_max);
+          normal_sum += normal_probs[j];
+          ability_sum += ability_probs[j];
+        }
+
+        const float safe_normal = normal_sum > 0.0f ? normal_sum : 1.0f;
+        const float safe_ability = ability_sum > 0.0f ? ability_sum : 1.0f;
+        for (int j = 0; j < kPolicyBranchSize; ++j) {
+          const float normal_prob =
+              (1.0f - p_burn) * (normal_probs[j] / safe_normal);
+          const float ability_prob = p_burn * (ability_probs[j] / safe_ability);
+          policy[j] = std::log(std::max(normal_prob, 1e-30f));
+          policy[kPolicyBranchSize + j] =
+              std::log(std::max(ability_prob, 1e-30f));
+        }
+      }
+    } else if (!doubled_policy_) {
+      for (int i = 0; i < batchSize; ++i) {
+        auto* policy = io->op_policy_mem_ + i * kNumOutputPolicy;
+        std::fill(policy + kPolicyBranchSize, policy + kNumOutputPolicy, -1e9f);
+      }
+    }
   }
 
   ~SyclNetwork() {
@@ -910,6 +1095,8 @@ class SyclNetwork : public Network {
     return capabilities_;
   }
 
+  int GetNumInputPlanes() const { return num_input_planes_; }
+
   // Check if device is the cpu for thread handling.
   bool IsCpu() const override { return is_cpu_; }
 
@@ -930,7 +1117,8 @@ class SyclNetwork : public Network {
     std::lock_guard<std::mutex> lock(inputs_outputs_lock_);
     if (free_inputs_outputs_.empty()) {
       return std::make_unique<InputsOutputs>(
-          max_batch_size_, wdl_, moves_left_, *sycl_queue_, tensor_mem_size_, scratch_size_,
+          max_batch_size_, num_input_planes_, wdl_, moves_left_,
+          gate_hidden_size_, *sycl_queue_, tensor_mem_size_, scratch_size_,
           !has_tensor_cores_ && std::is_same<sycl::half, DataType>::value);
     } else {
       std::unique_ptr<InputsOutputs> resource =
@@ -969,10 +1157,17 @@ class SyclNetwork : public Network {
 
   int numBlocks_;
   int numFilters_;
+  int num_input_planes_;
   bool has_se_;
   bool conv_policy_;
   bool attn_policy_;
   bool attn_body_;
+  bool doubled_policy_ = false;
+  int gate_hidden_size_ = 0;
+  std::vector<float> gate_dense1_w_;
+  float gate_dense1_b_ = 0.0f;
+  std::unique_ptr<EmbeddingLayer<DataType>> gate_policy_embed_layer_;
+  std::unique_ptr<EmbeddingLayer<DataType>> gate_embed_layer_;
   int num_encoder_blocks_;
   std::vector<std::unique_ptr<BaseLayer<DataType>>> network_;
   BaseLayer<DataType>* getLastLayer() { return network_.back().get(); }
