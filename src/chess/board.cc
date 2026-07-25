@@ -1187,6 +1187,8 @@ Move ChessBoard::ParseMove(std::string_view move_str) const {
         move_str.size() > 4 ? PieceType::Parse(move_str[4]) : kKnight;
     if (!promotion.CanPromoteInto()) complain("invalid promotion");
     parsed = Move::WhitePromotion(from, to, promotion);
+  } else if (move_str.size() > 4) {
+    complain("promotion suffix on non-promotion move");
   } else if (from == our_king_ && our_pieces_.get(to)) {
     // FRC-style castling.
     parsed = Move::WhiteCastling(from.file(), to.file());

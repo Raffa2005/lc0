@@ -71,6 +71,7 @@ const std::unordered_map<std::string, std::unordered_set<std::string>>
         {{"setoption"}, {"name", "value"}},
         {{"ucinewgame"}, {}},
         {{"position"}, {"fen", "startpos", "moves"}},
+        {{"dminfo"}, {}},
         {{"go"},
          {"infinite", "wtime", "btime", "winc", "binc", "movestogo", "depth",
           "mate", "nodes", "movetime", "searchmoves", "ponder"}},
@@ -205,6 +206,47 @@ bool UciLoop::DispatchCommand(
         StrSplitAtWhitespace(GetOrEmpty(params, "moves"));
     const std::string fen = GetOrEmpty(params, "fen");
     engine_->SetPosition(fen.empty() ? ChessBoard::kStartposFen : fen, moves);
+  } else if (command == "dminfo") {
+    const GameState state = engine_->GetGameState();
+    const Position position = state.CurrentPosition();
+    const bool black_to_move = position.IsBlackToMove();
+    const bool white_has =
+        black_to_move ? position.TheirDoublemoveAvailable()
+                      : position.OurDoublemoveAvailable();
+    const bool black_has =
+        black_to_move ? position.OurDoublemoveAvailable()
+                      : position.TheirDoublemoveAvailable();
+
+    const PositionHistory history = state.GetPositionHistory();
+    std::string result;
+    switch (history.ComputeGameResult()) {
+      case GameResult::UNDECIDED:
+        result = "ongoing";
+        break;
+      case GameResult::WHITE_WON:
+        result = "white";
+        break;
+      case GameResult::BLACK_WON:
+        result = "black";
+        break;
+      case GameResult::DRAW:
+        result = "draw";
+        break;
+    }
+
+    std::string legal = "dminfo legal";
+    for (Move move : GenerateDoubleMoveLegalMoves(state)) {
+      if (black_to_move) move.Flip();
+      legal += " " + move.ToString(/*is_chess960=*/false);
+    }
+
+    uci_responder_->SendRawResponses(
+        {"dminfo fen " + PositionToFen(position),
+         std::string("dminfo turn ") + (black_to_move ? "b" : "w"),
+         "dminfo ability " + std::to_string(white_has) + " " +
+             std::to_string(black_has) + " " +
+             std::to_string(position.IsMidDoublemove()),
+         "dminfo result " + result, std::move(legal), "dminfo ready"});
   } else if (command == "go") {
     GoParams go_params;
     if (ContainsKey(params, "infinite")) {

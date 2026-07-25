@@ -2051,21 +2051,9 @@ void SearchWorker::ExtendNode(Node* node, int depth,
 
   // We don't need the mutex because other threads will see that N=0 and
   // N-in-flight=1 and will not touch this node.
-  const auto& board = history->Last().GetBoard();
   const auto& pos = history->Last();
-  auto legal_moves = board.GenerateLegalMoves();
-
-  // During mid-double-move, filter out king captures (opponent's king may be
-  // in check from the first move, but capturing it is never legal).
-  if (pos.IsMidDoublemove()) {
-    const Square their_king = board.their_king();
-    legal_moves.erase(
-        std::remove_if(legal_moves.begin(), legal_moves.end(),
-                       [their_king](const Move& m) {
-                         return m.to() == their_king;
-                       }),
-        legal_moves.end());
-  }
+  const auto& board = pos.GetBoard();
+  auto legal_moves = GenerateDoubleMoveBoardMoves(pos);
 
   // Check whether it's a draw/lose by position. Importantly, we must check
   // these before doing the by-rule checks below.
@@ -2153,7 +2141,9 @@ void SearchWorker::ExtendNode(Node* node, int depth,
     const size_t n = legal_moves.size();
     legal_moves.reserve(2 * n);
     for (size_t i = 0; i < n; i++) {
-      legal_moves.push_back(legal_moves[i].WithAbilityActivation());
+      if (HasLegalDoubleMoveContinuation(pos, legal_moves[i])) {
+        legal_moves.push_back(legal_moves[i].WithAbilityActivation());
+      }
     }
   }
 

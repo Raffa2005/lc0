@@ -200,6 +200,11 @@ void Engine::InitializeSearchPosition(bool for_ponder) {
 
 void Engine::SetPosition(const std::string& fen,
                          const std::vector<std::string>& moves) {
+  // Parse and validate into a local value first. A malformed `position`
+  // command must not stop the current search, alter the backend, or replace
+  // the last valid game state.
+  GameState next_position = MakeGameStateFromUci(fen, moves);
+
   EnsureSearchStopped();
   ponder_enabled_ = options_.Get<bool>(kPonderId);
   strict_uci_timing_ = options_.Get<bool>(kStrictUciTiming);
@@ -207,8 +212,13 @@ void Engine::SetPosition(const std::string& fen,
   search_->StartClock();
   UpdateBackendConfig();
   EnsureSyzygyTablebasesLoaded();
-  last_position_ = MakeGameStateFromUci(fen, moves);
+  last_position_ = std::move(next_position);
   if (!ponder_enabled_) InitializeSearchPosition(/*for_ponder=*/false);
+}
+
+GameState Engine::GetGameState() const {
+  if (last_position_) return *last_position_;
+  return MakeGameStateFromUci(ChessBoard::kStartposFen, {});
 }
 
 void Engine::NewGame() {

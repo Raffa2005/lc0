@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "chess/callbacks.h"
+#include "chess/gamestate.h"
 #include "utils/exception.h"
 #include "utils/optionsparser.h"
 
@@ -86,6 +87,10 @@ class EngineControllerBase {
   // Blocks.
   virtual void SetPosition(const std::string& fen,
                            const std::vector<std::string>& moves) = 0;
+
+  // Returns the last position supplied by UCI, or startpos if none was
+  // supplied. This is a snapshot and does not mutate search state.
+  virtual GameState GetGameState() const = 0;
 
   // Must not block.
   virtual void Go(const GoParams& params) = 0;

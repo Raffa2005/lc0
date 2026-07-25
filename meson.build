@@ -954,6 +954,11 @@ if get_option('gtest')
     include_directories: includes, link_with: lc0_lib, dependencies: gtest
   ), args: '--gtest_output=xml:position.xml', timeout: 90)
 
+  test('UciLoopTest',
+    executable('uciloop_test', 'src/chess/uciloop_test.cc',
+    include_directories: includes, link_with: lc0_lib, dependencies: gtest
+  ), args: '--gtest_output=xml:uciloop.xml', timeout: 90)
+
   test('OptionsParserTest',
     executable('optionsparser_test', 'src/utils/optionsparser_test.cc',
     include_directories: includes, link_with: lc0_lib, dependencies: gtest

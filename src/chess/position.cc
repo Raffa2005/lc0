@@ -50,12 +50,20 @@ Position::Position(const Position& parent, Move m)
   is_mid_doublemove_ = false;
 }
 
+// Both legs form one turn. The completing leg advances the standard
+// side-to-move ply; the first leg does not.
 Position::Position(const Position& parent, Move m, bool is_first_of_double)
-    : rule50_ply_(parent.rule50_ply_ + 1), ply_count_(parent.ply_count_ + 1) {
+    : rule50_ply_(parent.rule50_ply_ + 1),
+      ply_count_(parent.ply_count_ + (is_first_of_double ? 0 : 1)) {
   us_board_ = parent.us_board_;
   const bool is_zeroing = us_board_.ApplyMove(m);
   if (!is_first_of_double) {
     us_board_.Mirror();
+  } else {
+    // En passant lasts only until the next move. The opponent does not move
+    // between the two halves, so a marker created by half 1 must not be
+    // available to the same player or survive in the mid-double FEN.
+    us_board_.ClearEnPassant();
   }
   if (is_zeroing) rule50_ply_ = 0;
 
@@ -88,7 +96,7 @@ Position::Position(const ChessBoard& board, int rule50_ply, int game_ply)
 //   "WB"     both have ability (default)
 //   "W"      only white has ability
 //   "-B"     only black has ability
-//   "Wm"    white has ability AND mid-doublemove (rare; legal positions only)
+//   "-Bm"   black has ability; white is midway through its consumed ability
 static void ParseAbilityField(std::string_view tok, bool* white_has,
                               bool* black_has, bool* mid_double) {
   *white_has = false;
@@ -148,6 +156,15 @@ Position Position::FromFen(std::string_view fen) {
         ++stop;
       }
       ability_tok = fen.substr(start, stop - start);
+      while (stop < fen.size() &&
+             (fen[stop] == ' ' || fen[stop] == '\t')) {
+        ++stop;
+      }
+      if (stop != fen.size()) {
+        throw Exception(
+            "Extra field after double-move ability state in FEN: " +
+            std::string(fen));
+      }
     }
   }
 
@@ -163,6 +180,16 @@ Position Position::FromFen(std::string_view fen) {
     pos.our_doublemove_available_ = black_to_move ? black_has : white_has;
     pos.their_doublemove_available_ = black_to_move ? white_has : black_has;
     pos.is_mid_doublemove_ = mid_double;
+    if (mid_double && pos.our_doublemove_available_) {
+      throw Exception(
+          "Invalid double-move ability state in FEN: the side midway through "
+          "a double move cannot still have its ability");
+    }
+    if (mid_double && !pos.us_board_.en_passant().empty()) {
+      throw Exception(
+          "Invalid double-move FEN: en passant must be '-' midway through a "
+          "double move");
+    }
   }
 
   return pos;
@@ -251,16 +278,22 @@ void PositionHistory::Append(Move m, bool is_first_of_double) {
 int PositionHistory::ComputeLastMoveRepetitions(int* cycle_length) const {
   *cycle_length = 0;
   const auto& last = positions_.back();
-  // TODO(crem) implement hash/cache based solution.
-  if (last.GetRule50Ply() < 4) return 0;
+  if (last.IsMidDoublemove() || last.GetRule50Ply() == 0) return 0;
 
-  for (int idx = positions_.size() - 5; idx >= 0; idx -= 2) {
+  // A double move adds an extra mid-turn position, so fixed parity/index
+  // stepping no longer identifies prior positions for the same side. Scan
+  // completed positions and compare the complete variant identity instead.
+  for (int idx = positions_.size() - 2; idx >= 0; --idx) {
     const auto& pos = positions_[idx];
-    if (pos.GetBoard() == last.GetBoard()) {
-      *cycle_length = positions_.size() - 1 - idx;
+    const int distance = positions_.size() - 1 - idx;
+    if (!pos.IsMidDoublemove() && distance >= 4 &&
+        pos.GetBoard() == last.GetBoard() &&
+        pos.OurDoublemoveAvailable() == last.OurDoublemoveAvailable() &&
+        pos.TheirDoublemoveAvailable() == last.TheirDoublemoveAvailable()) {
+      *cycle_length = distance;
       return 1 + pos.GetRepetitions();
     }
-    if (pos.GetRule50Ply() < 2) return 0;
+    if (pos.GetRule50Ply() == 0) return 0;
   }
   return 0;
 }

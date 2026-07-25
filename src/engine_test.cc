@@ -41,6 +41,7 @@ namespace {
 
 using testing::_;
 using testing::Invoke;
+using testing::Mock;
 using testing::Return;
 
 class EngineTest : public ::testing::Test {
@@ -132,10 +133,34 @@ TEST_F(EngineTest, BackendReloadByUpdateBackendConfig) {
   EXPECT_NE(backend_, prev_backend);  // Backend recreated.
 }
 
+TEST_F(EngineTest, InvalidPositionDoesNotMutateEngineOrSearchState) {
+  Engine engine(search_factory_, *options_);
+  engine.SetPosition(ChessBoard::kStartposFen, {"e2e4"});
+  const std::string valid_fen =
+      PositionToFen(engine.GetGameState().CurrentPosition());
+
+  Mock::VerifyAndClearExpectations(search_);
+  EXPECT_CALL(*search_, AbortSearch()).Times(0);
+  EXPECT_CALL(*search_, WaitSearch()).Times(0);
+  EXPECT_CALL(*search_, StartClock()).Times(0);
+  EXPECT_CALL(*search_, SetPosition(_)).Times(0);
+  EXPECT_CALL(*search_, SetBackend(_)).Times(0);
+
+  EXPECT_THROW(engine.SetPosition(ChessBoard::kStartposFen,
+                                  {"e2e4", "e7e4"}),
+               Exception);
+  EXPECT_EQ(PositionToFen(engine.GetGameState().CurrentPosition()), valid_fen);
+
+  // Destructor legitimately stops the search, so finish the zero-call
+  // assertions before leaving this scope.
+  Mock::VerifyAndClearExpectations(search_);
+}
+
 }  // namespace
 }  // namespace lczero
 
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
+  lczero::InitializeMagicBitboards();
   return RUN_ALL_TESTS();
 }
