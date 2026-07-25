@@ -2446,10 +2446,11 @@ AttentionBody<DataType>::AttentionBody(const MultiHeadWeights& weights,
     embedding_ffn_size_ = weights.ip_emb_ffn.dense2_b.size();
     embedding_ffn_dff_ = weights.ip_emb_ffn.dense1_b.size();
   } else {
-    size_t size = 64 * kNumPosEncodingChannels * sizeof(float);
-    pos_encoding_ = (DataType *)sycl::malloc_device(size, sycl_queue_);
-    sycl_queue_.memcpy(scratch, kPosEncoding, size);
-    copyTypeConverted(pos_encoding_, (float*)scratch, size, sycl_queue_);
+    const int elements = 64 * kNumPosEncodingChannels;
+    pos_encoding_ = sycl::malloc_device<DataType>(elements, sycl_queue_);
+    sycl_queue_.memcpy(scratch, kPosEncoding, elements * sizeof(float));
+    copyTypeConverted(pos_encoding_, static_cast<float*>(scratch), elements,
+                      sycl_queue_);
   }
 
   if (has_gating_) {
@@ -2520,7 +2521,6 @@ void AttentionBody<DataType>::Eval(int N, DataType* output,
 
   int inputC = input_c_;
   if (num_resi_blocks_ == 0) {
-    assert(inputC == kInputPlanes);
     /*
       # if there are no residual blocks (pure transformer), do some input
       processing
@@ -2549,7 +2549,7 @@ void AttentionBody<DataType>::Eval(int N, DataType* output,
       addVectors(buffer1, buffer1, ip_emb_pre_b_, size, size, num_outputs,
                  ACTIVATION_NONE, sycl_queue);
       inputPreprocessForAttentionBody((DataType*)scratch, input, buffer1, N,
-                                      kInputPlanes, embedding_dense_size_, true,
+                                      input_c_, embedding_dense_size_, true,
                                       sycl_queue);
       inputC += embedding_dense_size_;
     } else {
@@ -2563,7 +2563,7 @@ void AttentionBody<DataType>::Eval(int N, DataType* output,
       axis=2)
       */
       inputPreprocessForAttentionBody((DataType*)scratch, input, pos_encoding_,
-                                      N, kInputPlanes, kNumPosEncodingChannels,
+                                      N, input_c_, kNumPosEncodingChannels,
                                       false, sycl_queue);
       inputC += kNumPosEncodingChannels;
     }

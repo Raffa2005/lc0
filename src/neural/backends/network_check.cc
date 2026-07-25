@@ -51,8 +51,11 @@ enum CheckMode {
 
 struct CheckParams {
   CheckMode mode;
-  double absolute_tolerance;
-  double relative_tolerance;
+  double value_absolute_tolerance;
+  double value_relative_tolerance;
+  double policy_absolute_tolerance;
+  double policy_relative_tolerance;
+  int raw_policy_outputs;
   pblczero::NetworkFormat::InputFormat input_format;
 };
 
@@ -71,11 +74,15 @@ class CheckComputation : public NetworkComputation {
     work_comp_->AddInput(std::move(x));
     check_comp_->AddInput(std::move(y));
 
-    ChessBoard board;
-    int rule50;
-    int gameply;
-    PopulateBoard(params_.input_format, input, &board, &rule50, &gameply);
-    moves_.emplace_back(board.GenerateLegalMoves());
+    if (params_.raw_policy_outputs == 0) {
+      ChessBoard board;
+      int rule50;
+      int gameply;
+      PopulateBoard(params_.input_format, input, &board, &rule50, &gameply);
+      moves_.emplace_back(board.GenerateLegalMoves());
+    } else {
+      moves_.emplace_back();
+    }
   }
 
   void ComputeBlocking() override {
@@ -140,21 +147,42 @@ class CheckComputation : public NetworkComputation {
     return policy;
   }
 
+  std::vector<float> PolicyValues(const NetworkComputation* comp, int sample,
+                                  const std::vector<Move>& moves) const {
+    if (params_.raw_policy_outputs == 0) {
+      return PolicySoftMax(comp, sample, moves);
+    }
+    std::vector<float> policy;
+    policy.reserve(params_.raw_policy_outputs);
+    for (int move_id = 0; move_id < params_.raw_policy_outputs; ++move_id) {
+      policy.emplace_back(comp->GetPVal(sample, move_id));
+    }
+    return policy;
+  }
+
   void CheckOnly() const {
     bool valueAlmostEqual = true;
     const int size = GetBatchSize();
     for (int i = 0; i < size && valueAlmostEqual; i++) {
-      const float v1 = work_comp_->GetQVal(i);
-      const float v2 = check_comp_->GetQVal(i);
-      valueAlmostEqual &= IsAlmostEqual(v1, v2);
+      valueAlmostEqual &= IsAlmostEqual(
+          work_comp_->GetQVal(i), check_comp_->GetQVal(i),
+          params_.value_absolute_tolerance, params_.value_relative_tolerance);
+      valueAlmostEqual &= IsAlmostEqual(
+          work_comp_->GetDVal(i), check_comp_->GetDVal(i),
+          params_.value_absolute_tolerance, params_.value_relative_tolerance);
+      valueAlmostEqual &= IsAlmostEqual(
+          work_comp_->GetMVal(i), check_comp_->GetMVal(i),
+          params_.value_absolute_tolerance, params_.value_relative_tolerance);
     }
 
     bool policyAlmostEqual = true;
     for (int i = 0; i < size && policyAlmostEqual; i++) {
-      const auto work = PolicySoftMax(work_comp_.get(), i, moves_[i]);
-      const auto check = PolicySoftMax(check_comp_.get(), i, moves_[i]);
+      const auto work = PolicyValues(work_comp_.get(), i, moves_[i]);
+      const auto check = PolicyValues(check_comp_.get(), i, moves_[i]);
       for (size_t j = 0; j < work.size(); j++) {
-        policyAlmostEqual &= IsAlmostEqual(work[j], check[j]);
+        policyAlmostEqual &=
+            IsAlmostEqual(work[j], check[j], params_.policy_absolute_tolerance,
+                          params_.policy_relative_tolerance);
       }
     }
 
@@ -179,10 +207,11 @@ class CheckComputation : public NetworkComputation {
          << " policy incorrect (but value ok).";
   }
 
-  bool IsAlmostEqual(double a, double b) const {
-    return std::abs(a - b) <= std::max(params_.relative_tolerance *
-                                           std::max(std::abs(a), std::abs(b)),
-                                       params_.absolute_tolerance);
+  bool IsAlmostEqual(double a, double b, double absolute_tolerance,
+                     double relative_tolerance) const {
+    return std::abs(a - b) <=
+           std::max(relative_tolerance * std::max(std::abs(a), std::abs(b)),
+                    absolute_tolerance);
   }
 
   void DisplayHistogram() {
@@ -190,11 +219,11 @@ class CheckComputation : public NetworkComputation {
 
     const int size = GetBatchSize();
     for (int i = 0; i < size; i++) {
-      const float qv1 = work_comp_->GetQVal(i);
-      const float qv2 = check_comp_->GetQVal(i);
-      histogram.Add(qv2 - qv1);
-      const auto work = PolicySoftMax(work_comp_.get(), i, moves_[i]);
-      const auto check = PolicySoftMax(check_comp_.get(), i, moves_[i]);
+      histogram.Add(check_comp_->GetQVal(i) - work_comp_->GetQVal(i));
+      histogram.Add(check_comp_->GetDVal(i) - work_comp_->GetDVal(i));
+      histogram.Add(check_comp_->GetMVal(i) - work_comp_->GetMVal(i));
+      const auto work = PolicyValues(work_comp_.get(), i, moves_[i]);
+      const auto check = PolicyValues(check_comp_.get(), i, moves_[i]);
       for (size_t j = 0; j < work.size(); j++) {
         histogram.Add(check[j] - work[j]);
       }
@@ -239,15 +268,15 @@ class CheckComputation : public NetworkComputation {
     MaximumError value_error;
     const int size = GetBatchSize();
     for (int i = 0; i < size; i++) {
-      const float v1 = work_comp_->GetQVal(i);
-      const float v2 = check_comp_->GetQVal(i);
-      value_error.Add(v1, v2);
+      value_error.Add(work_comp_->GetQVal(i), check_comp_->GetQVal(i));
+      value_error.Add(work_comp_->GetDVal(i), check_comp_->GetDVal(i));
+      value_error.Add(work_comp_->GetMVal(i), check_comp_->GetMVal(i));
     }
 
     MaximumError policy_error;
     for (int i = 0; i < size; i++) {
-      const auto work = PolicySoftMax(work_comp_.get(), i, moves_[i]);
-      const auto check = PolicySoftMax(check_comp_.get(), i, moves_[i]);
+      const auto work = PolicyValues(work_comp_.get(), i, moves_[i]);
+      const auto check = PolicyValues(check_comp_.get(), i, moves_[i]);
       for (size_t j = 0; j < work.size(); j++) {
         policy_error.Add(work[j], check[j]);
       }
@@ -256,7 +285,7 @@ class CheckComputation : public NetworkComputation {
     CERR << "maximum error for a batch of " << size << ":";
 
     value_error.Dump("  value");
-    policy_error.Dump("  policy");
+    policy_error.Dump(params_.raw_policy_outputs ? "  raw policy" : "  policy");
   }
 
   std::unique_ptr<NetworkComputation> work_comp_;
@@ -269,12 +298,16 @@ class CheckNetwork : public Network {
   static constexpr double kDefaultCheckFrequency = 0.2;
   static constexpr double kDefaultAbsoluteTolerance = 1e-5;
   static constexpr double kDefaultRelativeTolerance = 1e-4;
+  static constexpr int kMaxRawPolicyOutputs = 3716;
 
   CheckNetwork(const std::optional<WeightsFile>& weights,
                const OptionsDict& options) {
     params_.mode = kDefaultMode;
-    params_.absolute_tolerance = kDefaultAbsoluteTolerance;
-    params_.relative_tolerance = kDefaultRelativeTolerance;
+    params_.value_absolute_tolerance = kDefaultAbsoluteTolerance;
+    params_.value_relative_tolerance = kDefaultRelativeTolerance;
+    params_.policy_absolute_tolerance = kDefaultAbsoluteTolerance;
+    params_.policy_relative_tolerance = kDefaultRelativeTolerance;
+    params_.raw_policy_outputs = 0;
     check_frequency_ = kDefaultCheckFrequency;
 
     OptionsDict dict1;
@@ -294,10 +327,25 @@ class CheckNetwork : public Network {
       params_.mode = kErrorDisplay;
     }
 
-    params_.absolute_tolerance =
+    const double absolute_tolerance =
         options.GetOrDefault<float>("atol", kDefaultAbsoluteTolerance);
-    params_.relative_tolerance =
+    const double relative_tolerance =
         options.GetOrDefault<float>("rtol", kDefaultRelativeTolerance);
+    params_.value_absolute_tolerance =
+        options.GetOrDefault<float>("value_atol", absolute_tolerance);
+    params_.value_relative_tolerance =
+        options.GetOrDefault<float>("value_rtol", relative_tolerance);
+    params_.policy_absolute_tolerance =
+        options.GetOrDefault<float>("policy_atol", absolute_tolerance);
+    params_.policy_relative_tolerance =
+        options.GetOrDefault<float>("policy_rtol", relative_tolerance);
+    params_.raw_policy_outputs =
+        options.GetOrDefault<int>("raw_policy_outputs", 0);
+    if (params_.raw_policy_outputs < 0 ||
+        params_.raw_policy_outputs > kMaxRawPolicyOutputs) {
+      throw Exception("raw_policy_outputs must be between 0 and " +
+                      std::to_string(kMaxRawPolicyOutputs) + ".");
+    }
 
     const auto parents = options.ListSubdicts();
     if (parents.size() > 0) {
@@ -334,9 +382,10 @@ class CheckNetwork : public Network {
     switch (params_.mode) {
       case kCheckOnly:
         CERR << std::scientific << std::setprecision(1)
-             << "Check mode: check only with relative tolerance "
-             << params_.relative_tolerance << ", absolute tolerance "
-             << params_.absolute_tolerance << ".";
+             << "Check mode: value rtol " << params_.value_relative_tolerance
+             << ", value atol " << params_.value_absolute_tolerance
+             << ", policy rtol " << params_.policy_relative_tolerance
+             << ", policy atol " << params_.policy_absolute_tolerance << ".";
         break;
       case kErrorDisplay:
         CERR << "Check mode: error display.";
@@ -347,6 +396,10 @@ class CheckNetwork : public Network {
     }
     CERR << "Check rate: " << std::fixed << std::setprecision(0)
          << 100 * check_frequency_ << "%.";
+    if (params_.raw_policy_outputs > 0) {
+      CERR << "Comparing " << params_.raw_policy_outputs
+           << " raw policy outputs per sample.";
+    }
   }
 
   std::unique_ptr<NetworkComputation> NewComputation() override {
