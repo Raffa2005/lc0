@@ -55,6 +55,8 @@ struct CheckParams {
   double value_relative_tolerance;
   double policy_absolute_tolerance;
   double policy_relative_tolerance;
+  double moves_left_absolute_tolerance;
+  double moves_left_relative_tolerance;
   int raw_policy_outputs;
   pblczero::NetworkFormat::InputFormat input_format;
 };
@@ -170,9 +172,10 @@ class CheckComputation : public NetworkComputation {
       valueAlmostEqual &= IsAlmostEqual(
           work_comp_->GetDVal(i), check_comp_->GetDVal(i),
           params_.value_absolute_tolerance, params_.value_relative_tolerance);
-      valueAlmostEqual &= IsAlmostEqual(
-          work_comp_->GetMVal(i), check_comp_->GetMVal(i),
-          params_.value_absolute_tolerance, params_.value_relative_tolerance);
+      valueAlmostEqual &=
+          IsAlmostEqual(work_comp_->GetMVal(i), check_comp_->GetMVal(i),
+                        params_.moves_left_absolute_tolerance,
+                        params_.moves_left_relative_tolerance);
     }
 
     bool policyAlmostEqual = true;
@@ -266,11 +269,12 @@ class CheckComputation : public NetworkComputation {
 
   void DisplayError() {
     MaximumError value_error;
+    MaximumError moves_left_error;
     const int size = GetBatchSize();
     for (int i = 0; i < size; i++) {
       value_error.Add(work_comp_->GetQVal(i), check_comp_->GetQVal(i));
       value_error.Add(work_comp_->GetDVal(i), check_comp_->GetDVal(i));
-      value_error.Add(work_comp_->GetMVal(i), check_comp_->GetMVal(i));
+      moves_left_error.Add(work_comp_->GetMVal(i), check_comp_->GetMVal(i));
     }
 
     MaximumError policy_error;
@@ -285,6 +289,7 @@ class CheckComputation : public NetworkComputation {
     CERR << "maximum error for a batch of " << size << ":";
 
     value_error.Dump("  value");
+    moves_left_error.Dump("  moves left");
     policy_error.Dump(params_.raw_policy_outputs ? "  raw policy" : "  policy");
   }
 
@@ -307,6 +312,8 @@ class CheckNetwork : public Network {
     params_.value_relative_tolerance = kDefaultRelativeTolerance;
     params_.policy_absolute_tolerance = kDefaultAbsoluteTolerance;
     params_.policy_relative_tolerance = kDefaultRelativeTolerance;
+    params_.moves_left_absolute_tolerance = kDefaultAbsoluteTolerance;
+    params_.moves_left_relative_tolerance = kDefaultRelativeTolerance;
     params_.raw_policy_outputs = 0;
     check_frequency_ = kDefaultCheckFrequency;
 
@@ -339,6 +346,10 @@ class CheckNetwork : public Network {
         options.GetOrDefault<float>("policy_atol", absolute_tolerance);
     params_.policy_relative_tolerance =
         options.GetOrDefault<float>("policy_rtol", relative_tolerance);
+    params_.moves_left_absolute_tolerance = options.GetOrDefault<float>(
+        "moves_left_atol", params_.value_absolute_tolerance);
+    params_.moves_left_relative_tolerance = options.GetOrDefault<float>(
+        "moves_left_rtol", params_.value_relative_tolerance);
     params_.raw_policy_outputs =
         options.GetOrDefault<int>("raw_policy_outputs", 0);
     if (params_.raw_policy_outputs < 0 ||
@@ -385,7 +396,10 @@ class CheckNetwork : public Network {
              << "Check mode: value rtol " << params_.value_relative_tolerance
              << ", value atol " << params_.value_absolute_tolerance
              << ", policy rtol " << params_.policy_relative_tolerance
-             << ", policy atol " << params_.policy_absolute_tolerance << ".";
+             << ", policy atol " << params_.policy_absolute_tolerance
+             << ", moves-left rtol " << params_.moves_left_relative_tolerance
+             << ", moves-left atol " << params_.moves_left_absolute_tolerance
+             << ".";
         break;
       case kErrorDisplay:
         CERR << "Check mode: error display.";
