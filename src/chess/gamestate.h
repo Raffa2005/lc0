@@ -40,14 +40,34 @@ struct GameState {
   Position startpos;
   std::vector<Move> moves;
 
+  // Reconstructs the complete position history, including repetition counts.
+  PositionHistory GetPositionHistory() const;
   // Returns the position of the last move in the list.
   Position CurrentPosition() const;
   // Returns positions after all moves, including the starting and the last one.
   std::vector<Position> GetPositions() const;
 };
 
+// Returns ordinary moves allowed from a position under the phase-specific
+// double-move rules. In particular, opponent-king captures are excluded from
+// the second half.
+MoveList GenerateDoubleMoveBoardMoves(const Position& position);
+
+// Returns whether a legal ordinary move can begin a completable double turn.
+// The caller must supply a move from GenerateDoubleMoveBoardMoves(position).
+bool HasLegalDoubleMoveContinuation(const Position& position,
+                                    Move first_move);
+
+// Returns the moves that are legal under the double-move variant rules.
+//
+// Moves are in the side-to-move-relative representation used by ChessBoard.
+// Ability activations carry Move::is_ability_activation(). Callers emitting
+// UCI must flip moves when CurrentPosition().IsBlackToMove().
+MoveList GenerateDoubleMoveLegalMoves(const GameState& state);
+
 // Parses the same coordinate-move sequence accepted by the UCI
-// `position <fen> moves ...` command, including double-move activation `+`.
+// `position <fen> moves ...` command, including double-move activation `+`,
+// and validates every move against the variant rules.
 GameState MakeGameStateFromUci(const std::string& fen,
                                const std::vector<std::string>& moves);
 

@@ -89,6 +89,8 @@ class ChessBoard {
   // Applies the move. (Only for "ours" (white)). Returns true if 50 moves
   // counter should be removed.
   bool ApplyMove(Move move);
+  // Clears any en-passant marker without otherwise changing the board.
+  void ClearEnPassant() { pawns_ &= kPawnMask; }
   // Checks if the square is under attack from "theirs" (black).
   bool IsUnderAttack(Square square) const;
   // Generates the king attack info used for legal move detection.

@@ -48,6 +48,7 @@ class Engine : public EngineControllerBase {
   void NewGame() override;
   void SetPosition(const std::string& fen,
                    const std::vector<std::string>& moves) override;
+  GameState GetGameState() const override;
   void Go(const GoParams& params) override;
   void PonderHit() override;
   void Wait() override;

@@ -28,53 +28,132 @@
 #include "chess/gamestate.h"
 
 #include <algorithm>
-#include <numeric>
+
+#include "utils/exception.h"
 
 namespace lczero {
+namespace {
+
+MoveList GenerateDoubleMoveLegalMoves(const PositionHistory& history) {
+  if (history.ComputeGameResult() != GameResult::UNDECIDED) return {};
+
+  const Position& position = history.Last();
+  MoveList legal_moves = GenerateDoubleMoveBoardMoves(position);
+
+  if (position.OurDoublemoveAvailable() &&
+      !position.IsMidDoublemove()) {
+    const size_t ordinary_move_count = legal_moves.size();
+    legal_moves.reserve(ordinary_move_count * 2);
+    for (size_t i = 0; i < ordinary_move_count; ++i) {
+      if (HasLegalDoubleMoveContinuation(position, legal_moves[i])) {
+        legal_moves.push_back(legal_moves[i].WithAbilityActivation());
+      }
+    }
+  }
+  return legal_moves;
+}
+
+void AppendMove(PositionHistory* history, Move move) {
+  if (move.is_ability_activation()) {
+    history->Append(move.WithoutAbilityActivation(),
+                    /*is_first_of_double=*/true);
+  } else {
+    history->Append(move);
+  }
+}
+
+}  // namespace
+
+MoveList GenerateDoubleMoveBoardMoves(const Position& position) {
+  const ChessBoard& board = position.GetBoard();
+  MoveList legal_moves = board.GenerateLegalMoves();
+
+  // The first half may leave the opponent king attacked. Capturing it with the
+  // second half is not a move in chess, so remove that pseudo-legal artifact.
+  if (position.IsMidDoublemove()) {
+    const Square their_king = board.their_king();
+    legal_moves.erase(
+        std::remove_if(legal_moves.begin(), legal_moves.end(),
+                       [their_king](const Move& move) {
+                         return move.to() == their_king;
+                       }),
+        legal_moves.end());
+  }
+  return legal_moves;
+}
+
+bool HasLegalDoubleMoveContinuation(const Position& position,
+                                    Move first_move) {
+  if (position.IsMidDoublemove() ||
+      !position.OurDoublemoveAvailable()) {
+    return false;
+  }
+  const Position mid_position(position,
+                              first_move.WithoutAbilityActivation(),
+                              /*is_first_of_double=*/true);
+  return !GenerateDoubleMoveBoardMoves(mid_position).empty();
+}
 
 GameState MakeGameStateFromUci(const std::string& fen,
                                const std::vector<std::string>& moves) {
   GameState state;
   state.startpos = Position::FromFen(fen);
-  ChessBoard cur_board = state.startpos.GetBoard();
+  PositionHistory history;
+  history.Reset(state.startpos);
   state.moves.reserve(moves.size());
-  for (const auto& move : moves) {
-    Move m = cur_board.ParseMove(move);
-    state.moves.push_back(m);
-    cur_board.ApplyMove(m);
-    if (!m.is_ability_activation()) {
-      cur_board.Mirror();
+
+  for (size_t index = 0; index < moves.size(); ++index) {
+    const std::string& move_string = moves[index];
+    const Position& position = history.Last();
+    Move move;
+    try {
+      move = position.GetBoard().ParseMove(move_string);
+    } catch (const Exception& exception) {
+      throw Exception("Invalid position move " + std::to_string(index + 1) +
+                      " (" + move_string + "): " + exception.what());
     }
+
+    const MoveList legal_moves = GenerateDoubleMoveLegalMoves(history);
+    if (std::find(legal_moves.begin(), legal_moves.end(), move) ==
+        legal_moves.end()) {
+      std::string reason = "move is not legal";
+      if (move.is_ability_activation()) {
+        if (position.IsMidDoublemove()) {
+          reason = "cannot activate an ability during a double move";
+        } else if (!position.OurDoublemoveAvailable()) {
+          reason = "double-move ability is not available";
+        }
+      }
+      throw Exception("Invalid position move " + std::to_string(index + 1) +
+                      " (" + move_string + "): " + reason);
+    }
+
+    state.moves.push_back(move);
+    AppendMove(&history, move);
   }
   return state;
 }
 
+PositionHistory GameState::GetPositionHistory() const {
+  PositionHistory history;
+  history.Reset(startpos);
+  history.Reserve(moves.size() + 1);
+  for (Move move : moves) AppendMove(&history, move);
+  return history;
+}
+
 Position GameState::CurrentPosition() const {
-  return std::accumulate(
-      moves.begin(), moves.end(), startpos,
-      [](const Position& pos, Move m) {
-        if (m.is_ability_activation()) {
-          return Position(pos, m.WithoutAbilityActivation(),
-                          /*is_first_of_double=*/true);
-        }
-        return Position(pos, m);
-      });
+  return GetPositionHistory().Last();
 }
 
 std::vector<Position> GameState::GetPositions() const {
-  std::vector<Position> positions;
-  positions.reserve(moves.size() + 1);
-  positions.push_back(startpos);
-  std::transform(moves.begin(), moves.end(), std::back_inserter(positions),
-                 [&](Move m) {
-                   if (m.is_ability_activation()) {
-                     return Position(positions.back(),
-                                     m.WithoutAbilityActivation(),
-                                     /*is_first_of_double=*/true);
-                   }
-                   return Position(positions.back(), m);
-                 });
-  return positions;
+  const PositionHistory history = GetPositionHistory();
+  const std::span<const Position> positions = history.GetPositions();
+  return {positions.begin(), positions.end()};
+}
+
+MoveList GenerateDoubleMoveLegalMoves(const GameState& state) {
+  return GenerateDoubleMoveLegalMoves(state.GetPositionHistory());
 }
 
 }  // namespace lczero
