@@ -552,6 +552,15 @@ const OptionId SearchParams::kMaxPrefetchBatchId{
     "When the engine cannot gather a large enough batch for immediate use, try "
     "to prefetch up to X positions which are likely to be useful soon, and put "
     "them into cache."};
+const OptionId SearchParams::kPolicyOnlyAvoidTwofoldId{
+    {.long_flag = "policy-only-avoid-twofold",
+     .uci_option = "PolicyOnlyAvoidTwofold",
+     .help_text =
+         "For one-visit policy play, replace a move that creates a twofold or "
+         "allows one by an immediate opponent reply with the highest-prior "
+         "safe move whose prior is at least 50% of the top prior. Double "
+         "Moves are exempt. Has no effect unless explicitly enabled.",
+     .visibility = OptionId::kProOnly}};
 const OptionId SearchParams::kSolidTreeThresholdId{
     "solid-tree-threshold", "SolidTreeThreshold",
     "Only nodes with at least this number of visits will be considered for "
@@ -655,6 +664,7 @@ void BaseSearchParams::Populate(OptionsParser* options) {
 void SearchParams::Populate(OptionsParser* options) {
   BaseSearchParams::Populate(options);
   options->Add<IntOption>(kMaxPrefetchBatchId, 0, 1024) = DEFAULT_MAX_PREFETCH;
+  options->Add<BoolOption>(kPolicyOnlyAvoidTwofoldId) = false;
   options->Add<IntOption>(kSolidTreeThresholdId, 1, 2000000000) = 100;
 }
 

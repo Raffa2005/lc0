@@ -825,6 +825,7 @@ void Search::EnsureBestMoveKnown() REQUIRES(nodes_mutex_)
   auto bestmove_edge = temperature
                            ? GetBestRootChildWithTemperature(temperature)
                            : GetBestChildNoTemperature(root_node_, 0);
+  bestmove_edge = MaybeAvoidPolicyTwofold(bestmove_edge);
   final_bestmove_ = bestmove_edge.GetMove(played_history_.IsBlackToMove());
 
   if (bestmove_edge.GetN() > 0 && bestmove_edge.node()->HasChildren()) {
@@ -1006,6 +1007,60 @@ EdgeAndNode Search::GetBestRootChildWithTemperature(float temperature) const {
   }
   assert(false);
   return {};
+}
+
+bool Search::CausesOrAllowsImmediateTwofold(
+    const EdgeAndNode& edge) const {
+  if (played_history_.Last().IsMidDoublemove() ||
+      edge.GetMove().is_ability_activation()) {
+    return false;
+  }
+  PositionHistory history(played_history_);
+  history.Append(edge.GetMove());
+  if (history.Last().GetRepetitions() >= 1) return true;
+  if (history.ComputeGameResult() != GameResult::UNDECIDED) return false;
+
+  // An activated reply and its completion cannot repeat an earlier completed
+  // position: consuming the one-shot ability changes the variant identity.
+  // Generate only ordinary replies and test whether any of them immediately
+  // creates a second occurrence.
+  for (const Move reply : GenerateDoubleMoveBoardMoves(history.Last())) {
+    history.Append(reply);
+    const bool repeats = history.Last().GetRepetitions() >= 1;
+    history.Pop();
+    if (repeats) return true;
+  }
+  return false;
+}
+
+EdgeAndNode Search::MaybeAvoidPolicyTwofold(EdgeAndNode selected) const {
+  if (!params_.GetPolicyOnlyAvoidTwofold() ||
+      !CausesOrAllowsImmediateTwofold(selected)) {
+    return selected;
+  }
+
+  constexpr float kMinimumPriorRatio = 0.5f;
+  std::vector<EdgeAndNode> candidates;
+  float top_prior = 0.0f;
+  for (auto& edge : root_node_->Edges()) {
+    if (!root_move_filter_.empty() &&
+        std::find(root_move_filter_.begin(), root_move_filter_.end(),
+                  edge.GetMove()) == root_move_filter_.end()) {
+      continue;
+    }
+    top_prior = std::max(top_prior, edge.GetP());
+    candidates.push_back(edge);
+  }
+  std::stable_sort(candidates.begin(), candidates.end(),
+                   [](const EdgeAndNode& lhs, const EdgeAndNode& rhs) {
+                     return lhs.GetP() > rhs.GetP();
+                   });
+  const float minimum_prior = top_prior * kMinimumPriorRatio;
+  for (const auto& candidate : candidates) {
+    if (candidate.GetP() < minimum_prior) break;
+    if (!CausesOrAllowsImmediateTwofold(candidate)) return candidate;
+  }
+  return selected;
 }
 
 void Search::StartThreads(size_t how_many) {

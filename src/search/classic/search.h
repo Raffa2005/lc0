@@ -105,6 +105,8 @@ class Search {
   std::vector<EdgeAndNode> GetBestChildrenNoTemperature(Node* parent, int count,
                                                         int depth) const;
   EdgeAndNode GetBestRootChildWithTemperature(float temperature) const;
+  EdgeAndNode MaybeAvoidPolicyTwofold(EdgeAndNode selected) const;
+  bool CausesOrAllowsImmediateTwofold(const EdgeAndNode& edge) const;
 
   int64_t GetTimeSinceStart() const;
   int64_t GetTimeSinceFirstBatch() const;
