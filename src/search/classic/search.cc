@@ -38,6 +38,7 @@
 #include <thread>
 
 #include "neural/encoder.h"
+#include "search/classic/fpu.h"
 #include "search/classic/node.h"
 #include "utils/fastmath.h"
 #include "utils/random.h"
@@ -509,22 +510,30 @@ float Search::GetDrawScore(bool is_odd_depth) const {
 }
 
 namespace {
-inline float GetFpu(const SearchParams& params, const Node* node, bool is_root_node,
-                    float draw_score) {
+inline bool IsMidDoublemoveNode(const Node* node, const Node* root_node,
+                                const PositionHistory& played_history) {
+  if (node == root_node) return played_history.Last().IsMidDoublemove();
+  return node->GetParent() &&
+         node->GetOwnEdge()->GetMove().is_ability_activation();
+}
+
+inline float GetFpu(const SearchParams& params, const Node* node,
+                    bool is_root_node, float draw_score,
+                    bool is_mid_doublemove) {
   const auto value = params.GetFpuValue(is_root_node);
-  return params.GetFpuAbsolute(is_root_node)
-             ? value
-             : -node->GetQ(-draw_score) -
-                   value * std::sqrt(node->GetVisitedPolicy());
+  return ComputeFirstPlayUrgency(
+      value, params.GetFpuAbsolute(is_root_node), node->GetWL(), node->GetD(),
+      draw_score, node->GetVisitedPolicy(), is_mid_doublemove);
 }
 
 // Faster version for if visited_policy is readily available already.
-inline float GetFpu(const SearchParams& params, const Node* node, bool is_root_node,
-                    float draw_score, float visited_pol) {
+inline float GetFpu(const SearchParams& params, const Node* node,
+                    bool is_root_node, float draw_score, float visited_pol,
+                    bool is_mid_doublemove) {
   const auto value = params.GetFpuValue(is_root_node);
-  return params.GetFpuAbsolute(is_root_node)
-             ? value
-             : -node->GetQ(-draw_score) - value * std::sqrt(visited_pol);
+  return ComputeFirstPlayUrgency(
+      value, params.GetFpuAbsolute(is_root_node), node->GetWL(), node->GetD(),
+      draw_score, visited_pol, is_mid_doublemove);
 }
 
 inline float ComputeCpuct(const SearchParams& params, uint32_t N,
@@ -545,7 +554,9 @@ std::vector<std::string> Search::GetVerboseStats(const Node* node) const {
   const bool is_odd_depth = !is_root;
   const bool is_black_to_move = (played_history_.IsBlackToMove() == is_root);
   const float draw_score = GetDrawScore(is_odd_depth);
-  const float fpu = GetFpu(params_, node, is_root, draw_score);
+  const float fpu =
+      GetFpu(params_, node, is_root, draw_score,
+             IsMidDoublemoveNode(node, root_node_, played_history_));
   const float cpuct = ComputeCpuct(params_, node->GetN(), is_root);
   const float U_coeff =
       cpuct * std::sqrt(std::max(node->GetChildrenVisits(), 1u));
@@ -957,7 +968,8 @@ EdgeAndNode Search::GetBestRootChildWithTemperature(float temperature) const {
   const float offset = params_.GetTemperatureVisitOffset();
   float max_eval = -1.0f;
   const float fpu =
-      GetFpu(params_, root_node_, /* is_root= */ true, draw_score);
+      GetFpu(params_, root_node_, /* is_root= */ true, draw_score,
+             played_history_.Last().IsMidDoublemove());
 
   for (auto& edge : root_node_->Edges()) {
     if (!root_move_filter_.empty() &&
@@ -1123,7 +1135,8 @@ void Search::PopulateCommonIterationStats(IterationStats* stats) {
   if (root_node_->GetN() > 0) {
     const auto draw_score = GetDrawScore(true);
     const float fpu =
-        GetFpu(params_, root_node_, /* is_root_node */ true, draw_score);
+        GetFpu(params_, root_node_, /* is_root_node */ true, draw_score,
+               played_history_.Last().IsMidDoublemove());
     float max_q_plus_m = -1000;
     uint64_t max_n = 0;
     bool max_n_has_max_q_plus_m = true;
@@ -1878,7 +1891,9 @@ void SearchWorker::PickNodesToExtendTask(
         current_util[index] = q + m_evaluator.GetMUtility(child, q);
       }
       const float fpu =
-          GetFpu(params_, node, is_root_node, draw_score, visited_pol);
+          GetFpu(params_, node, is_root_node, draw_score, visited_pol,
+                 IsMidDoublemoveNode(node, search_->root_node_,
+                                     search_->played_history_));
       for (int i = 0; i < max_needed; i++) {
         if (current_util[i] == std::numeric_limits<float>::lowest()) {
           current_util[i] = fpu + m_evaluator.GetDefaultMUtility();
@@ -2274,7 +2289,9 @@ int SearchWorker::PrefetchIntoCache(Node* node, int budget, bool is_odd_depth) {
   const float puct_mult =
       cpuct * std::sqrt(std::max(node->GetChildrenVisits(), 1u));
   const float fpu =
-      GetFpu(params_, node, node == search_->root_node_, draw_score);
+      GetFpu(params_, node, node == search_->root_node_, draw_score,
+             IsMidDoublemoveNode(node, search_->root_node_,
+                                 search_->played_history_));
   for (auto& edge : node->Edges()) {
     if (edge.GetP() == 0.0f) continue;
     // Flip the sign of a score to be able to easily sort.
