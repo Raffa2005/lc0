@@ -74,6 +74,10 @@ const OptionId kSoftAdjudicateRateId{
     "450-ply cap), 0 < r < 1 = per-game Bernoulli with rate r. Used to mix "
     "ability-rich short games and standard-chess full-length games in the "
     "same training run."};
+const OptionId kRootOnlyId{
+    "root-only", "RootOnly",
+    "Search only the initial position, report its root evaluation, and stop "
+    "without making a move. Intended for batched position scans."};
 }  // namespace
 
 void SelfPlayGame::PopulateUciParams(OptionsParser* options) {
@@ -87,6 +91,7 @@ void SelfPlayGame::PopulateUciParams(OptionsParser* options) {
   options->Add<StringOption>(kSyzygyTablebaseId);
   options->Add<FloatOption>(kOpeningStopProbId, 0.0f, 1.0f) = 0.0f;
   options->Add<FloatOption>(kSoftAdjudicateRateId, 0.0f, 1.0f) = 1.0f;
+  options->Add<BoolOption>(kRootOnlyId) = false;
 }
 
 SelfPlayGame::SelfPlayGame(PlayerOptions white, PlayerOptions black,
@@ -303,6 +308,24 @@ void SelfPlayGame::Play(int white_threads, int black_threads, bool training,
     Move best_move;
     bool best_is_terminal;
     const auto best_eval = search_->GetBestEval(&best_move, &best_is_terminal);
+    if (options_[idx].uci_options->Get<bool>(kRootOnlyId)) {
+      const auto* root_node = tree_[idx]->GetCurrentHead();
+      root_q_ = -root_node->GetWL();
+      root_d_ = root_node->GetD();
+      root_best_q_ = best_eval.wl;
+      root_best_d_ = best_eval.d;
+      if (blacks_move) {
+        root_q_ = -root_q_;
+        root_best_q_ = -root_best_q_;
+      }
+      root_visits_ = root_node->GetN();
+      root_best_move_ = best_move;
+      root_evaluated_ = true;
+      search_.reset();
+      game_result_ = GameResult::DRAW;
+      adjudicated_ = true;
+      break;
+    }
     float eval = best_eval.wl;
     eval = (eval + 1) / 2;
     if (eval < min_eval_[idx]) min_eval_[idx] = eval;

@@ -94,6 +94,13 @@ class SelfPlayGame {
   bool IsSoftAdjudicated() const { return soft_adjudicated_; }
   float GetSoftResultQ() const { return soft_result_q_; }
   float GetSoftResultD() const { return soft_result_d_; }
+  bool HasRootEvaluation() const { return root_evaluated_; }
+  float GetRootQ() const { return root_q_; }
+  float GetRootD() const { return root_d_; }
+  float GetRootBestQ() const { return root_best_q_; }
+  float GetRootBestD() const { return root_best_d_; }
+  uint64_t GetRootVisits() const { return root_visits_; }
+  std::optional<Move> GetRootBestMove() const { return root_best_move_; }
   std::vector<Move> GetMoves() const;
   // Gets the eval which required the biggest swing up to get the final outcome.
   // Eval is the expected outcome in the range 0<->1.
@@ -121,6 +128,13 @@ class SelfPlayGame {
   bool soft_adjudicated_ = false;
   float soft_result_q_ = 0.0f;  // From white's perspective.
   float soft_result_d_ = 1.0f;
+  bool root_evaluated_ = false;
+  float root_q_ = 0.0f;  // From White's perspective.
+  float root_d_ = 0.0f;
+  float root_best_q_ = 0.0f;  // From White's perspective.
+  float root_best_d_ = 0.0f;
+  uint64_t root_visits_ = 0;
+  std::optional<Move> root_best_move_;
   // Per-game Bernoulli decision (against --soft-adjudicate-rate) whether this
   // game soft-adjudicates when both abilities are exhausted. Decided lazily on
   // the first ply where both abilities are spent, then cached so the rest of

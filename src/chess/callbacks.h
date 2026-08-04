@@ -131,6 +131,15 @@ struct GameInfo {
   // soft_adjudicated is true). q is from white's perspective in [-1, 1].
   float soft_q = 0.0f;
   float soft_d = 0.0f;
+  // Root-search diagnostics, populated by selfplay --root-only mode. Values
+  // are from White's perspective so custom-FEN scans can be joined directly.
+  bool root_evaluated = false;
+  float root_q = 0.0f;
+  float root_d = 0.0f;
+  float root_best_q = 0.0f;
+  float root_best_d = 0.0f;
+  uint64_t root_visits = 0;
+  std::optional<Move> root_best_move;
 
   using Callback = std::function<void(const GameInfo&)>;
 };

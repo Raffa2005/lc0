@@ -100,6 +100,16 @@ void SelfPlayLoop::SendGameInfo(const GameInfo& info) {
                                                             : "blackwon");
     }
   }
+  if (info.root_evaluated) {
+    res += " rooteval q " + std::to_string(info.root_q) +
+           " d " + std::to_string(info.root_d) +
+           " bestq " + std::to_string(info.root_best_q) +
+           " bestd " + std::to_string(info.root_best_d) +
+           " visits " + std::to_string(info.root_visits);
+    if (info.root_best_move) {
+      res += " bestmove " + info.root_best_move->ToString(true);
+    }
+  }
   if (!info.moves.empty()) {
     res += " moves";
     for (const auto& move : info.moves) res += " " + move.ToString(true);

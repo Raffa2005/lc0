@@ -231,8 +231,15 @@ SelfPlayTournament::SelfPlayTournament(const OptionsDict& options,
           "Scheduled openings are not supported in policy/value multi-game "
           "mode.");
     }
-    if (kAbilityMode != "normal") {
-      throw Exception("Scheduled openings require ability-mode=normal.");
+    if (kAbilityMode == "no-ability") {
+      const std::string no_ability_start_fen =
+          std::string(ChessBoard::kStartposFen) + " --";
+      for (auto& opening : openings_) {
+        opening.start_fen = no_ability_start_fen;
+      }
+    } else if (kAbilityMode != "normal") {
+      throw Exception(
+          "Scheduled openings require ability-mode=normal or no-ability.");
     }
     if (options.Get<bool>(kOpeningsMirroredId) ||
         options.Get<std::string>(kOpeningsModeId) != "sequential" ||
@@ -531,6 +538,13 @@ void SelfPlayTournament::PlayOneGame(int game_number) {
     game_info.soft_adjudicated = game.IsSoftAdjudicated();
     game_info.soft_q = game.GetSoftResultQ();
     game_info.soft_d = game.GetSoftResultD();
+    game_info.root_evaluated = game.HasRootEvaluation();
+    game_info.root_q = game.GetRootQ();
+    game_info.root_d = game.GetRootD();
+    game_info.root_best_q = game.GetRootBestQ();
+    game_info.root_best_d = game.GetRootBestD();
+    game_info.root_visits = game.GetRootVisits();
+    game_info.root_best_move = game.GetRootBestMove();
     game_info.is_black = player1_black;
     game_info.game_id = game_number;
     game_info.opening_id = opening.id;
