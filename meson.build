@@ -954,6 +954,11 @@ if get_option('gtest')
     include_directories: includes, link_with: lc0_lib, dependencies: gtest
   ), args: '--gtest_output=xml:position.xml', timeout: 90)
 
+  test('FirstPlayUrgencyTest',
+    executable('fpu_test', 'src/search/classic/fpu_test.cc',
+    include_directories: includes, link_with: lc0_lib, dependencies: gtest
+  ), args: '--gtest_output=xml:fpu.xml', timeout: 90)
+
   test('UciLoopTest',
     executable('uciloop_test', 'src/chess/uciloop_test.cc',
     include_directories: includes, link_with: lc0_lib, dependencies: gtest
