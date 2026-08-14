@@ -558,8 +558,9 @@ const OptionId SearchParams::kPolicyOnlyAvoidTwofoldId{
      .help_text =
          "For one-visit policy play, replace a move that creates a twofold or "
          "allows one by an immediate opponent reply with the highest-prior "
-         "safe move whose prior is at least 50% of the top prior. Double "
-         "Moves are exempt. Has no effect unless explicitly enabled.",
+         "safe move. The minimum prior ratio is 50% through Q=+0.5, then "
+         "decreases linearly to 5% at Q=+1. Double Moves are exempt. Has no "
+         "effect unless explicitly enabled.",
      .visibility = OptionId::kProOnly}};
 const OptionId SearchParams::kSolidTreeThresholdId{
     "solid-tree-threshold", "SolidTreeThreshold",

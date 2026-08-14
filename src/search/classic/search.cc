@@ -40,6 +40,7 @@
 #include "neural/encoder.h"
 #include "search/classic/fpu.h"
 #include "search/classic/node.h"
+#include "search/classic/policy_only.h"
 #include "utils/fastmath.h"
 #include "utils/random.h"
 #include "utils/spinhelper.h"
@@ -1051,7 +1052,6 @@ EdgeAndNode Search::MaybeAvoidPolicyTwofold(EdgeAndNode selected) const {
     return selected;
   }
 
-  constexpr float kMinimumPriorRatio = 0.5f;
   std::vector<EdgeAndNode> candidates;
   float top_prior = 0.0f;
   for (auto& edge : root_node_->Edges()) {
@@ -1067,7 +1067,12 @@ EdgeAndNode Search::MaybeAvoidPolicyTwofold(EdgeAndNode selected) const {
                    [](const EdgeAndNode& lhs, const EdgeAndNode& rhs) {
                      return lhs.GetP() > rhs.GetP();
                    });
-  const float minimum_prior = top_prior * kMinimumPriorRatio;
+  // At an ordinary root lc0 stores WL from the previous mover's perspective,
+  // so negating it gives the value head's side-to-move Q. Mid-double roots
+  // were already exempted by CausesOrAllowsImmediateTwofold().
+  const float root_q = -root_node_->GetWL();
+  const float minimum_prior =
+      top_prior * PolicyOnlySafePriorRatio(root_q);
   for (const auto& candidate : candidates) {
     if (candidate.GetP() < minimum_prior) break;
     if (!CausesOrAllowsImmediateTwofold(candidate)) return candidate;
