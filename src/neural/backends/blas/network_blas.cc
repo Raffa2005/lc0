@@ -74,7 +74,14 @@ class BlasComputation : public NetworkComputation {
   virtual ~BlasComputation() {}
 
   // Adds a sample to the batch.
-  void AddInput(InputPlanes&& input) override { planes_.emplace_back(input); }
+  void AddInput(InputPlanes&& input) override {
+    const auto input_planes = network_->GetNumInputPlanes();
+    if (input.size() < input_planes) {
+      throw Exception("Not enough input planes for the BLAS network.");
+    }
+    input.resize(input_planes);
+    planes_.emplace_back(std::move(input));
+  }
 
   // Do the computation.
   void ComputeBlocking() override;
@@ -172,6 +179,8 @@ class BlasNetwork : public Network {
 
   int GetMiniBatchSize() const override { return 7; }
 
+  size_t GetNumInputPlanes() const { return num_input_planes_; }
+
   bool IsCpu() const override { return true; }
 
   void InitThread(int id) override { Numa::BindThread(id); }
@@ -198,6 +207,7 @@ class BlasNetwork : public Network {
 
   const NetworkCapabilities capabilities_;
   MultiHeadWeights weights_;
+  size_t num_input_planes_;
   size_t max_batch_size_;
   int threads_;
   bool wdl_;
@@ -472,6 +482,7 @@ void BlasComputation<use_eigen>::ForwardEncoderLayer(
 
 template <bool use_eigen>
 void BlasComputation<use_eigen>::ComputeBlocking() {
+  const auto num_input_planes = network_->GetNumInputPlanes();
   const auto& value_head = weights_.value_heads.at(value_head_);
   const auto& policy_head = weights_.policy_heads.at(policy_head_);
   // Retrieve network key dimensions from the weights structure.
@@ -499,7 +510,7 @@ void BlasComputation<use_eigen>::ComputeBlocking() {
                                 ? weights_.ip_emb_preproc_b.size() / 64
                                 : kNumPosEncodingChannels;
   const auto input_channels =
-      static_cast<size_t>(kInputPlanes + (attn_body_ ? enc_channels : 0));
+      static_cast<size_t>(num_input_planes + (attn_body_ ? enc_channels : 0));
   const auto input_embed_dff = weights_.ip_emb_ffn.dense1_b.size();
 
   const auto max_channels =
@@ -560,12 +571,12 @@ void BlasComputation<use_eigen>::ComputeBlocking() {
   for (size_t start = 0; start < total_batches; start += largest_batch_size) {
     const auto batch_size = std::min(total_batches - start, largest_batch_size);
     for (size_t j = 0; j < batch_size; j++) {
-      EncodePlanes(planes_[start + j], &buffer1[j * kSquares * kInputPlanes]);
+      EncodePlanes(planes_[start + j], &buffer1[j * kSquares * num_input_planes]);
     }
 
     if (num_res_blocks > 0) {
       // Input convolution
-      convolve3.Forward(batch_size, kInputPlanes, output_channels,
+      convolve3.Forward(batch_size, num_input_planes, output_channels,
                         buffer1.data(), weights_.input.weights.data(),
                         buffer2.data());
 
@@ -617,7 +628,7 @@ void BlasComputation<use_eigen>::ComputeBlocking() {
             for (auto i = 0; i < kSquares; i++) {
               for (size_t j = 0; j < 12; j++) {
                 buffer3[batch * kSquares * 12 + i * 12 + j] =
-                    buffer1[batch * kSquares * kInputPlanes + j * kSquares + i];
+                    buffer1[batch * kSquares * num_input_planes + j * kSquares + i];
               }
             }
           }
@@ -633,21 +644,21 @@ void BlasComputation<use_eigen>::ComputeBlocking() {
         for (auto batch = size_t{0}; batch < batch_size; batch++) {
           for (auto i = 0; i < kSquares; i++) {
             // Input NCHW to NHWC conversion.
-            for (size_t j = 0; j < kInputPlanes; j++) {
+            for (size_t j = 0; j < num_input_planes; j++) {
               buffer3[batch * kSquares * input_size + i * input_size + j] =
-                  buffer1[batch * kSquares * kInputPlanes + j * kSquares + i];
+                  buffer1[batch * kSquares * num_input_planes + j * kSquares + i];
             }
             // Position encoding concat.
             if (is_pe_dense_embedding_) {
-              for (size_t j = kInputPlanes; j < input_size; j++) {
+              for (size_t j = num_input_planes; j < input_size; j++) {
                 buffer3[batch * kSquares * input_size + i * input_size + j] =
                     buffer2[batch * kSquares * enc_channels + i * enc_channels +
-                            j - kInputPlanes];
+                            j - num_input_planes];
               }
             } else {
-              for (size_t j = kInputPlanes; j < input_size; j++) {
+              for (size_t j = num_input_planes; j < input_size; j++) {
                 buffer3[batch * kSquares * input_size + i * input_size + j] =
-                    kPosEncoding[i][j - kInputPlanes];
+                    kPosEncoding[i][j - num_input_planes];
               }
             }
           }
@@ -1097,12 +1108,39 @@ BlasNetwork<use_eigen>::BlasNetwork(const WeightsFile& file,
     max_batch_size_ = kHardMaxBatchSize;
   }
 
-  const auto inputChannels = kInputPlanes;
   const auto channels = static_cast<int>(weights_.input.biases.size());
   const auto residual_blocks = weights_.residual.size();
 
+  // Match the CUDA/SYCL backends: ordinary BT3 uses 112 planes, not 114.
+  int input_planes = kInputPlanes;
+  if (residual_blocks > 0) {
+    const size_t denominator = static_cast<size_t>(channels) * 9;
+    if (denominator == 0 || weights_.input.weights.size() % denominator != 0) {
+      throw Exception("Cannot determine the BLAS network input-plane count.");
+    }
+    input_planes = static_cast<int>(weights_.input.weights.size() / denominator);
+  } else if (attn_body_) {
+    const size_t embedding_size = weights_.ip_emb_b.size();
+    if (embedding_size == 0 || weights_.ip_emb_w.size() % embedding_size != 0) {
+      throw Exception("Cannot determine the BLAS attention input-plane count.");
+    }
+    if (is_pe_dense_embedding_ && weights_.ip_emb_preproc_b.size() % 64 != 0) {
+      throw Exception("Invalid dense positional-embedding dimensions.");
+    }
+    const int positional_channels = is_pe_dense_embedding_
+        ? static_cast<int>(weights_.ip_emb_preproc_b.size() / 64)
+        : kNumPosEncodingChannels;
+    input_planes = static_cast<int>(weights_.ip_emb_w.size() / embedding_size)
+                   - positional_channels;
+  }
+  if (input_planes <= 0 || input_planes > kInputPlanes) {
+    throw Exception("Unsupported BLAS network input-plane count: " +
+                    std::to_string(input_planes));
+  }
+  num_input_planes_ = static_cast<size_t>(input_planes);
+
   weights_.input.weights =
-      WinogradFilterTransformF(weights_.input.weights, channels, inputChannels);
+      WinogradFilterTransformF(weights_.input.weights, channels, num_input_planes_);
 
   // residual blocks
   for (size_t i = 0; i < residual_blocks; i++) {
