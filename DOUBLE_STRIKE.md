@@ -9,6 +9,6 @@ pins a compatible network and provides source build and self-hosting scripts.
 The public site is https://doublestrikechess.com.
 
 Upstream code is by the Leela Chess Zero contributors listed in `AUTHORS`.
-Double Strike Chess modifications are by Rafael Sabirov. This fork remains
+Our Double Strike Chess modifications and this fork remain
 GPL-3.0-or-later, including the permissions and exceptions stated in the source
 headers. See `COPYING` for the complete GPL text.
